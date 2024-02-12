@@ -1,33 +1,19 @@
-# Yugioh AI
+# YGO Agent
 
-Yugioh AI uses large language models (LLM) and RL to play Yu-Gi-Oh. It is inspired by [yugioh-ai](https://github.com/melvinzhang/yugioh-ai]) and [yugioh-game](https://github.com/tspivey/yugioh-game), and uses [ygopro-core](https://github.com/Fluorohydride/ygopro-core).
+YGO Agent is a project to create a Yu-Gi-Oh! AI using deep learning (LLMs, RL). It consists of a game environment and a set of AI agents.
+
+## ygoenv
+`ygoenv` is a high performance game environment for Yu-Gi-Oh! It is initially inspired by [yugioh-ai](https://github.com/melvinzhang/yugioh-ai]) and [yugioh-game](https://github.com/tspivey/yugioh-game), and now implemented on top of [envpool](https://github.com/sail-sg/envpool).
+
+## ygoai
+`ygoai` is a set of AI agents for playing Yu-Gi-Oh! It aims to achieve superhuman performance like AlphaGo. Currently, only a RL-based agent is implemented.
 
 ## Usage
-
-### Setup
-
-An automated setup script is provided for Linux (tested on Ubuntu 22.04). It will install all dependencies and build the library. To run it, execute the following commands:
-
-```bash
-make setup
-```
+TODO
 
 ### Running
+TODO
 
-Test that the repo is setup correctly by running:
 
-```
-python cli.py --deck1 deck/Starter.ydk --deck2 deck/BlueEyes.ydk
-```
-
-You should see text output showing two random AI playing a duel by making random moves.
-
-You can set `--seed` to a fixed value to get deterministic results.
-
-## Implementation
-
-The implementation is initially based on [yugioh-game](https://github.com/tspivey/yugioh-game). To provide a clean game environment, it removes all server code and only keeps basic duel-related classes and message handlers.
-To implement the AI, inspired by [yugioh-ai](https://github.com/melvinzhang/yugioh-ai]), every message handler also provides all possible actions that can be taken in response to the message.
-
-## Notes
-Never 
+## Related Projects
+TODO
