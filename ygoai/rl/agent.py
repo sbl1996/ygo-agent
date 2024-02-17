@@ -28,7 +28,7 @@ class Agent(nn.Module):
         c = channels
         self.loc_embed = nn.Embedding(9, c)
         self.loc_norm = nn.LayerNorm(c, elementwise_affine=affine)
-        self.seq_embed = nn.Embedding(41, c)
+        self.seq_embed = nn.Embedding(61, c)
         self.seq_norm = nn.LayerNorm(c, elementwise_affine=affine)
 
         linear = lambda in_features, out_features: nn.Linear(in_features, out_features, bias=bias)
