@@ -2,10 +2,12 @@
 #define YGOENV_YGOPRO_YGOPRO_H_
 
 // clang-format off
+#include <numeric>
 #include <stdexcept>
 #include <string>
 #include <fstream>
 #include <shared_mutex>
+#include <iostream>
 
 #include <fmt/core.h>
 #include <fmt/ranges.h>
@@ -883,7 +885,8 @@ inline card_data db_query_card_data(const SQLite::Database &db, CardCode code) {
   card_data card;
   card.code = code;
   card.alias = query.getColumn("alias");
-  card.setcode = query.getColumn("setcode").getInt64();
+  uint64_t setcode = query.getColumn("setcode").getInt64();
+  card.set_setcode(setcode);
   card.type = query.getColumn("type");
   uint32_t level_ = query.getColumn("level");
   card.level = level_ & 0xff;
@@ -1311,6 +1314,9 @@ protected:
 
   std::vector<std::string> revealed_;
 
+  // discard hand cards
+  bool discard_hand_ = false;
+
 public:
   YGOProEnv(const Spec &spec, int env_id)
       : Env<YGOProEnvSpec>(spec, env_id),
@@ -1442,8 +1448,49 @@ public:
     if (ha_p < 0) {
       ha_p = n_history_actions_ - 1;
     }
+    history_actions[ha_p].Zero();
     _set_obs_action(history_actions, ha_p, msg_, options_[idx], {},
                     h_card_ids[idx]);
+  }
+
+  void show_deck(const std::vector<CardCode> &deck, const std::string &prefix) const {
+    fmt::print("{} deck:", prefix);
+    for (auto code : deck) {
+      fmt::print(" {}", c_get_card(code).name());
+    }
+    fmt::print("\n");
+  }
+
+  void show_turn() const {
+    fmt::println("turn: {}, phase: {}, tplayer: {}", turn_count_, phase_to_string(current_phase_), tp_);
+  }
+
+  void show_deck(PlayerId player) const {
+    fmt::print("Player {}'s deck:\n", player);
+    show_deck(player == 0 ? main_deck0_ : main_deck1_, "Main");
+    show_deck(player == 0 ? extra_deck0_ : extra_deck1_, "Extra");
+  }
+
+  void show_history_actions(PlayerId player) const {
+    const auto &ha = player == 0 ? history_actions_0_ : history_actions_1_;
+    // print card ids of history actions
+    for (int i = 0; i < n_history_actions_; ++i) {
+      fmt::print("history {}\n", i);
+      uint8_t msg_id = uint8_t(ha(i, _obs_action_feat_offset()));
+      int msg = _msgs[msg_id - 1];
+      fmt::print("msg: {},", msg_to_string(msg));
+      for (int j = 0; j < spec_.config["max_multi_select"_]; j++) {
+        auto v1 = static_cast<CardId>(ha(i, 2 * j));
+        auto v2 = static_cast<CardId>(ha(i, 2 * j + 1));
+        CardId card_id = (v1 << 8) + v2;
+        fmt::print(" {}", card_id);
+      }
+      fmt::print(";");
+      for (int j = _obs_action_feat_offset() + 1; j < ha.Shape()[1]; j++) {
+        fmt::print(" {}", uint8_t(ha(i, j)));
+      }
+      fmt::print("\n");
+    }
   }
 
   void Step(const Action &action) override {
@@ -2421,13 +2468,13 @@ private:
         players_[pl]->notify(fmt::format("{} equipped to {}.", c, t));
       }
     } else if (msg_ == MSG_HINT) {
-      if (!verbose_) {
-        dp_ = dl_;
-        return;
-      }
-      auto hint_type = int(read_u8());
+      auto hint_type = read_u8();
       auto player = read_u8();
       auto value = read_u32();
+
+      if (hint_type == HINT_SELECTMSG && value == 501) {
+        discard_hand_ = true;
+      }
       // non-GUI don't need hint
       return;
       if (hint_type == HINT_SELECTMSG) {
@@ -3055,14 +3102,6 @@ private:
       auto max = read_u8();
       auto size = read_u8();
 
-      if (min > spec_.config["max_multi_select"_]) {
-        fmt::println("min: {}, max: {}, size: {}", min, max, size);
-        throw std::runtime_error(
-            fmt::format("Min > {} not implemented for select card",
-                        spec_.config["max_multi_select"_]));
-      }
-      max = std::min(max, uint8_t(spec_.config["max_multi_select"_]));
-
       std::vector<std::string> specs;
       specs.reserve(size);
       if (verbose_) {
@@ -3097,6 +3136,38 @@ private:
           specs.push_back(spec);
         }
       }
+
+      if (min > spec_.config["max_multi_select"_]) {
+        if (discard_hand_) {
+          // random discard
+          std::vector<int> comb(size);
+          std::iota(comb.begin(), comb.end(), 0);
+          std::shuffle(comb.begin(), comb.end(), gen_);
+          resp_buf_[0] = min;
+          for (int i = 0; i < min; ++i) {
+            resp_buf_[i + 1] = comb[i];
+          }
+          set_responseb(pduel_, resp_buf_);
+          discard_hand_ = false;
+          return;
+        }
+
+        show_turn();
+
+        show_deck(player);
+        show_history_actions(player);
+
+        show_deck(1-player);
+        show_history_actions(1-player);
+
+        fmt::println("player: {}, min: {}, max: {}, size: {}", player, min, max, size);
+        std::cout << std::flush;
+        throw std::runtime_error(
+            fmt::format("Min > {} not implemented for select card",
+                        spec_.config["max_multi_select"_]));
+      }
+
+      max = std::min(max, uint8_t(spec_.config["max_multi_select"_]));
 
       std::vector<std::vector<int>> combs;
       for (int i = min; i <= max; ++i) {
