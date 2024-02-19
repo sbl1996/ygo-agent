@@ -51,7 +51,7 @@ class Args:
     n_history_actions: int = 8
     """the number of history actions to use"""
     play_mode: str = "self"
-    """the play mode, can be combination of 'self', 'bot', 'greedy', like 'self+bot'"""
+    """the play mode, can be combination of 'self', 'bot', 'random', like 'self+bot'"""
 
     num_layers: int = 2
     """the number of layers for the agent"""
@@ -163,6 +163,7 @@ if __name__ == "__main__":
     optimizer = optim.Adam(agent.parameters(), lr=args.learning_rate, eps=1e-5)
 
     avg_win_rates = []
+    avg_ep_returns = []
     elo = Elo()
 
     selfplay = "self" in args.play_mode
@@ -233,11 +234,12 @@ if __name__ == "__main__":
                                 avg_win_rates.append(1 - winner)
                             else:
                                 # win rate of agent
-                                winner = 0 if episode_reward == 1 else 1
+                                winner = 0 if episode_reward > 0 else 1
                                 elo.update(winner)
                                 writer.add_scalar("charts/elo_rating", elo.r0, global_step)
                         else:
-                            winner = 0 if episode_reward == 1 else 1
+                            avg_ep_returns.append(episode_reward)
+                            winner = 0 if episode_reward > 0 else 1
                             avg_win_rates.append(1 - winner)
                             elo.update(winner)
                             writer.add_scalar("charts/elo_rating", elo.r0, global_step)
@@ -245,7 +247,9 @@ if __name__ == "__main__":
 
                         if len(avg_win_rates) > 100:
                             writer.add_scalar("charts/avg_win_rate", np.mean(avg_win_rates), global_step)
+                            writer.add_scalar("charts/avg_ep_return", np.mean(avg_ep_returns), global_step)
                             avg_win_rates = []
+                            avg_ep_returns = []
 
             to_play = infos['to_play'] if selfplay else None
             obs = next_obs
