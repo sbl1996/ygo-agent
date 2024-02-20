@@ -1,5 +1,6 @@
 import torch
 import torch.nn as nn
+from torch.distributions import Categorical
 
 
 def bytes_to_bin(x, points, intervals):
@@ -18,11 +19,11 @@ def make_bin_params(x_max=32000, n_bins=32, sig_bins=24):
     return points, intervals
 
 
-class Agent(nn.Module):
+class Encoder(nn.Module):
 
     def __init__(self, channels=128, num_card_layers=2, num_action_layers=2,
                  num_history_action_layers=2, embedding_shape=None, bias=False, affine=True):
-        super(Agent, self).__init__()
+        super(Encoder, self).__init__()
         self.num_history_action_layers = num_history_action_layers
 
         c = channels
@@ -129,11 +130,6 @@ class Agent(nn.Module):
         ])
 
         self.action_norm = nn.LayerNorm(c, elementwise_affine=False)
-        self.value_head = nn.Sequential(
-            nn.Linear(c, c // 4),
-            nn.ReLU(),
-            nn.Linear(c // 4, 1),
-        )
 
         self.init_embeddings()
 
@@ -147,7 +143,6 @@ class Agent(nn.Module):
                 nn.init.uniform_(m.weight, -scale, scale)
             elif "fc_emb" in n:
                 nn.init.uniform_(m.weight, -scale, scale)
-            
 
     def load_embeddings(self, embeddings, freeze=True):
         weight = self.id_embed.weight
@@ -309,7 +304,78 @@ class Agent(nn.Module):
                 f_actions = layer(f_actions, f_h_actions)
 
         f_actions = self.action_norm(f_actions)
+        return f_actions, mask, valid
+
+
+class PPOAgent(nn.Module):
+
+    def __init__(self, channels=128, num_card_layers=2, num_action_layers=2,
+                 num_history_action_layers=2, embedding_shape=None, bias=False, affine=True):
+        super(PPOAgent, self).__init__()
+
+        self.encoder = Encoder(
+            channels, num_card_layers, num_action_layers, num_history_action_layers, embedding_shape, bias, affine)
+
+        c = channels
+        self.actor = nn.Sequential(
+            nn.Linear(c, c // 4),
+            nn.ReLU(),
+            nn.Linear(c // 4, 1),
+        )
+
+        self.critic = nn.Sequential(
+            nn.Linear(c, c // 4),
+            nn.ReLU(),
+            nn.Linear(c // 4, 1),
+        )
+
+    def load_embeddings(self, embeddings, freeze=True):
+        self.encoder.load_embeddings(embeddings, freeze)
+
+
+    def get_value(self, x):
+        f_actions, mask, valid = self.encoder(x)
+        c_mask = 1 - mask.unsqueeze(-1).float()
+        f = (f_actions * c_mask).sum(dim=1) / c_mask.sum(dim=1)
+        return self.critic(f)
+
+    def get_action_and_value(self, x, action=None):
+        f_actions, mask, valid = self.encoder(x)
+        c_mask = 1 - mask.unsqueeze(-1).float()
+        f = (f_actions * c_mask).sum(dim=1) / c_mask.sum(dim=1)
+
+        logits = self.actor(f_actions)[..., 0]
+        logits = logits.masked_fill(mask, float("-inf"))
+
+        probs = Categorical(logits=logits)
+        if action is None:
+            action = probs.sample()
+        return action, probs.log_prob(action), probs.entropy(), self.critic(f), valid
+
+    
+class DMCAgent(nn.Module):
+
+    def __init__(self, channels=128, num_card_layers=2, num_action_layers=2,
+                 num_history_action_layers=2, embedding_shape=None, bias=False, affine=True):
+        super(DMCAgent, self).__init__()
+
+        self.encoder = Encoder(
+            channels, num_card_layers, num_action_layers, num_history_action_layers, embedding_shape, bias, affine)
+
+        c = channels
+        self.value_head = nn.Sequential(
+            nn.Linear(c, c // 4),
+            nn.ReLU(),
+            nn.Linear(c // 4, 1),
+        )
+
+    def load_embeddings(self, embeddings, freeze=True):
+        self.encoder.load_embeddings(embeddings, freeze)
+
+    def forward(self, x):
+        f_actions, mask, valid = self.encoder(f_actions)
         values = self.value_head(f_actions)[..., 0]
         # values = torch.tanh(values)
         values = torch.where(mask, torch.full_like(values, -10), values)
         return values, valid
+    

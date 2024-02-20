@@ -60,17 +60,17 @@ class Args:
 
     total_timesteps: int = 100000000
     """total timesteps of the experiments"""
-    learning_rate: float = 2.5e-4
+    learning_rate: float = 5e-4
     """the learning rate of the optimizer"""
     num_envs: int = 64
     """the number of parallel game environments"""
-    num_steps: int = 100
+    num_steps: int = 200
     """the number of steps per env per iteration"""
-    buffer_size: int = 200000
+    buffer_size: int = 20000
     """the replay memory buffer size"""
     gamma: float = 0.99
     """the discount factor gamma"""
-    minibatch_size: int = 256
+    minibatch_size: int = 1024
     """the mini-batch size"""
     eps: float = 0.05
     """the epsilon for exploration"""
@@ -264,13 +264,13 @@ if __name__ == "__main__":
 
         # ALGO LOGIC: training.
         _start = time.time()
-        b_inds = rb.get_data_indices()
-        if len(b_inds) < args.minibatch_size:
+        if not rb.full:
             continue
+        b_inds = rb.get_data_indices()
         np.random.shuffle(b_inds)
         b_obs, b_actions, b_returns = rb._get_samples(b_inds)
         sample_time += time.time() - _start
-        for start in range(0, len(b_inds), args.minibatch_size):
+        for start in range(0, len(b_returns), args.minibatch_size):
             _start = time.time()
             end = start + args.minibatch_size
             mb_obs = {
