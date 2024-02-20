@@ -15,6 +15,7 @@ import tyro
 from ygoai.utils import init_ygopro
 from ygoai.rl.utils import RecordEpisodeStatistics
 from ygoai.rl.agent import Agent
+from ygoai.rl.buffer import create_obs
 
 
 @dataclass
@@ -143,7 +144,7 @@ if __name__ == "__main__":
             state_dict = {k[len(prefix):] if k.startswith(prefix) else k: v for k, v in state_dict.items()}
             agent.load_state_dict(state_dict)
 
-            obs = optree.tree_map(lambda x: torch.from_numpy(x).to(device=device), envs.reset()[0])
+            obs = create_obs(envs.observation_space, (num_envs,), device=device)
             with torch.no_grad():
                 traced_model = torch.jit.trace(agent, (obs,), check_tolerance=False, check_trace=False)
             agent = torch.jit.optimize_for_inference(traced_model)

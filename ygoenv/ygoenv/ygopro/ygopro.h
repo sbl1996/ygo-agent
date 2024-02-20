@@ -1188,7 +1188,7 @@ public:
     int n_action_feats = 9 + conf["max_multi_select"_] * 2;
     return MakeDict(
         "obs:cards_"_.Bind(Spec<uint8_t>({conf["max_cards"_] * 2, 39})),
-        "obs:global_"_.Bind(Spec<uint8_t>({8})),
+        "obs:global_"_.Bind(Spec<uint8_t>({9})),
         "obs:actions_"_.Bind(
             Spec<uint8_t>({conf["max_options"_], n_action_feats})),
         "obs:h_actions_"_.Bind(
@@ -1659,9 +1659,10 @@ private:
     feat(2) = op_lp_1;
     feat(3) = op_lp_2;
 
-    feat(4) = phase2id.at(current_phase_);
-    feat(5) = (me == 0) ? 1 : 0;
-    feat(6) = (me == tp_) ? 1 : 0;
+    feat(4) = std::min(turn_count_, 8);
+    feat(5) = phase2id.at(current_phase_);
+    feat(6) = (me == 0) ? 1 : 0;
+    feat(7) = (me == tp_) ? 1 : 0;
   }
 
   void _set_obs_action_spec(TArray<uint8_t> &feat, int i, int j,
@@ -1883,7 +1884,7 @@ private:
 
     if (n_options == 0) {
       state["info:num_options"_] = 1;
-      state["obs:global_"_][7] = uint8_t(1);
+      state["obs:global_"_][8] = uint8_t(1);
       return;
     }
 

@@ -17,7 +17,7 @@
 ## Global
 - lp: 2, max 65535 to 2 bytes
 - oppo_lp: 2, max 65535 to 2 bytes
-<!-- - turn: 8, int, trunc to 8 -->
+- turn: 1, int, trunc to 8
 - phase: 1, int, one-hot (10)
 - is_first: 1, int, 0: False, 1: True
 - is_my_turn: 1, int, 0: False, 1: True

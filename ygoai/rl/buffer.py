@@ -510,6 +510,16 @@ class DMCBuffer:
         return data
 
 
+def create_obs(observation_space: spaces.Dict, shape: Tuple[int, ...], device: Union[th.device, str] = "cpu"):
+    obs_shape = get_obs_shape(observation_space)
+    obs = {
+        key: th.zeros(
+            (*shape, *_obs_shape),
+            dtype=dtype_dict[observation_space[key].dtype.type], device=device)
+        for key, _obs_shape in obs_shape.items()
+    }
+    return obs
+
 class DMCDictBuffer:
     observation_space: spaces.Dict
     obs_shape: Dict[str, Tuple[int, ...]]

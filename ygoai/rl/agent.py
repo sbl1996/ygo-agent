@@ -78,7 +78,8 @@ class Agent(nn.Module):
 
         self.lp_fc_emb = linear(c_num, c // 4)
         self.oppo_lp_fc_emb = linear(c_num, c // 4)
-        self.phase_embed = nn.Embedding(10, c // 4)
+        self.turn_embed = nn.Embedding(20, c // 8)
+        self.phase_embed = nn.Embedding(10, c // 8)
         self.if_first_embed = nn.Embedding(2, c // 8)
         self.is_my_turn_embed = nn.Embedding(2, c // 8)
 
@@ -231,11 +232,12 @@ class Agent(nn.Module):
         x_g_oppo_lp = self.oppo_lp_fc_emb(self.num_transform(x_global_1[:, 2:4]))
 
         x_global_2 = x[:, 4:-1].long()
-        x_g_phase = self.phase_embed(x_global_2[:, 0])
-        x_g_if_first = self.if_first_embed(x_global_2[:, 1])
-        x_g_is_my_turn = self.is_my_turn_embed(x_global_2[:, 2])
+        x_g_turn = self.turn_embed(x_global_2[:, 0])
+        x_g_phase = self.phase_embed(x_global_2[:, 1])
+        x_g_if_first = self.if_first_embed(x_global_2[:, 2])
+        x_g_is_my_turn = self.is_my_turn_embed(x_global_2[:, 3])
 
-        x_global = torch.cat([x_g_lp, x_g_oppo_lp, x_g_phase, x_g_if_first, x_g_is_my_turn], dim=-1)
+        x_global = torch.cat([x_g_lp, x_g_oppo_lp, x_g_turn, x_g_phase, x_g_if_first, x_g_is_my_turn], dim=-1)
         return x_global
 
     def forward(self, x):
@@ -308,6 +310,6 @@ class Agent(nn.Module):
 
         f_actions = self.action_norm(f_actions)
         values = self.value_head(f_actions)[..., 0]
-        values = torch.tanh(values)
-        values = torch.where(mask, torch.full_like(values, -1.01), values)
+        # values = torch.tanh(values)
+        values = torch.where(mask, torch.full_like(values, -10), values)
         return values, valid
