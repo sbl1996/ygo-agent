@@ -1454,11 +1454,11 @@ public:
   }
 
   void show_deck(const std::vector<CardCode> &deck, const std::string &prefix) const {
-    fmt::print("{} deck:", prefix);
-    for (auto code : deck) {
-      fmt::print(" {}", c_get_card(code).name());
+    fmt::print("{} deck: [", prefix);
+    for (int i = 0; i < deck.size(); i++) {
+      fmt::print(" '{}'", c_get_card(deck[i]).name());
     }
-    fmt::print("\n");
+    fmt::print(" ]\n");
   }
 
   void show_turn() const {
@@ -3961,6 +3961,8 @@ private:
         set_responsei(pduel_, 1 << pos);
       };
     } else {
+      show_deck(0);
+      show_deck(1);
       throw std::runtime_error(
         fmt::format("Unknown message {}, length {}, dp {}",
         msg_to_string(msg_), dl_, dp_));

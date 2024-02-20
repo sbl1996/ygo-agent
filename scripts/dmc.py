@@ -88,6 +88,8 @@ class Args:
     env_threads: Optional[int] = 32
     """the number of threads to use for envpool, defaults to `num_envs`"""
 
+    tb_dir: str = "./runs"
+    """tensorboard log directory"""
 
     # to be filled in runtime
     num_iterations: int = 0
@@ -109,7 +111,7 @@ if __name__ == "__main__":
     run_name = f"{args.env_id}__{args.exp_name}__{args.seed}__{timestamp}"
 
     from torch.utils.tensorboard import SummaryWriter
-    writer = SummaryWriter(f"runs/{run_name}")
+    writer = SummaryWriter(os.path.join(args.tb_dir, run_name))
     writer.add_text(
         "hyperparameters",
         "|param|value|\n|-|-|\n%s" % ("\n".join([f"|{key}|{value}|" for key, value in vars(args).items()])),
@@ -164,7 +166,7 @@ if __name__ == "__main__":
 
     avg_win_rates = []
     avg_ep_returns = []
-    elo = Elo()
+    # elo = Elo()
 
     selfplay = "self" in args.play_mode
     rb = DMCDictBuffer(
@@ -235,15 +237,13 @@ if __name__ == "__main__":
                             else:
                                 # win rate of agent
                                 winner = 0 if episode_reward > 0 else 1
-                                elo.update(winner)
-                                writer.add_scalar("charts/elo_rating", elo.r0, global_step)
+                                # elo.update(winner)
                         else:
                             avg_ep_returns.append(episode_reward)
                             winner = 0 if episode_reward > 0 else 1
                             avg_win_rates.append(1 - winner)
-                            elo.update(winner)
-                            writer.add_scalar("charts/elo_rating", elo.r0, global_step)
-                        print(f"global_step={global_step}, e_ret={episode_reward}, e_len={episode_length}, elo={elo.r0}")
+                            # elo.update(winner)
+                        print(f"global_step={global_step}, e_ret={episode_reward}, e_len={episode_length}")
 
                         if len(avg_win_rates) > 100:
                             writer.add_scalar("charts/avg_win_rate", np.mean(avg_win_rates), global_step)
