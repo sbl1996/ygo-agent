@@ -45,7 +45,7 @@ class Encoder(nn.Module):
         self.bin_intervals = nn.Parameter(bin_intervals, requires_grad=False)
 
         if embedding_shape is None:
-            n_embed, embed_dim = 150, 1024
+            n_embed, embed_dim = 1000, 1024
         else:
             n_embed, embed_dim = embedding_shape
             n_embed = 1 + n_embed  # 1 (index 0) for unknown
@@ -339,20 +339,29 @@ class PPOAgent(nn.Module):
         f = (f_actions * c_mask).sum(dim=1) / c_mask.sum(dim=1)
         return self.critic(f)
 
-    def get_action_and_value(self, x, action=None):
+    def get_action_and_value(self, x, action):
         f_actions, mask, valid = self.encoder(x)
         c_mask = 1 - mask.unsqueeze(-1).float()
         f = (f_actions * c_mask).sum(dim=1) / c_mask.sum(dim=1)
 
         logits = self.actor(f_actions)[..., 0]
+        logits = logits.float()
         logits = logits.masked_fill(mask, float("-inf"))
 
         probs = Categorical(logits=logits)
-        if action is None:
-            action = probs.sample()
         return action, probs.log_prob(action), probs.entropy(), self.critic(f), valid
 
-    
+    def forward(self, x):
+        f_actions, mask, valid = self.encoder(x)
+        c_mask = 1 - mask.unsqueeze(-1).float()
+        f = (f_actions * c_mask).sum(dim=1) / c_mask.sum(dim=1)
+
+        logits = self.actor(f_actions)[..., 0]
+        logits = logits.float()
+        logits = logits.masked_fill(mask, float("-inf"))
+        return logits, self.critic(f)
+
+
 class DMCAgent(nn.Module):
 
     def __init__(self, channels=128, num_card_layers=2, num_action_layers=2,

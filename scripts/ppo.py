@@ -13,7 +13,9 @@ import tyro
 import torch
 import torch.nn as nn
 import torch.optim as optim
+from torch.distributions import Categorical
 import torch.distributed as dist
+from torch.cuda.amp import GradScaler, autocast
 
 from ygoai.utils import init_ygopro
 from ygoai.rl.utils import RecordEpisodeStatistics
@@ -44,7 +46,7 @@ class Args:
     """the deck file for the second player"""
     code_list_file: str = "code_list.txt"
     """the code list file for card embeddings"""
-    embedding_file: str = "embeddings_en.npy"
+    embedding_file: Optional[str] = "embeddings_en.npy"
     """the embedding file for card embeddings"""
     max_options: int = 24
     """the maximum number of options"""
@@ -101,6 +103,10 @@ class Args:
     """the number of threads to use for torch, defaults to ($OMP_NUM_THREADS or 2) * world_size"""
     env_threads: Optional[int] = None
     """the number of threads to use for envpool, defaults to `num_envs`"""
+    fp16_train: bool = False
+    """if toggled, training will be done in fp16 precision"""
+    fp16_eval: bool = False
+    """if toggled, evaluation will be done in fp16 precision"""
 
     tb_dir: str = "./runs"
     """tensorboard log directory"""
@@ -199,21 +205,29 @@ def run(local_rank, world_size):
 
     envs = RecordEpisodeStatistics(envs)
 
-    embeddings = np.load(args.embedding_file)
+    if args.embedding_file:
+        embeddings = np.load(args.embedding_file)
+        embedding_shape = embeddings.shape
+    else:
+        embedding_shape = None
     L = args.num_layers
-    agent = Agent(args.num_channels, L, L, 1, embeddings.shape).to(device)
-    agent.load_embeddings(embeddings)
+    agent = Agent(args.num_channels, L, L, 1, embedding_shape).to(device)
+    if args.embedding_file:
+        agent.load_embeddings(embeddings)
 
-    if args.compile:
-        agent.get_action_and_value = torch.compile(agent.get_action_and_value, mode=args.compile_mode)
+    # if args.compile:
+    #     agent.get_action_and_value = torch.compile(agent.get_action_and_value, mode=args.compile_mode)
     optimizer = optim.Adam(agent.parameters(), lr=args.learning_rate, eps=1e-5)
+
+    scaler = GradScaler(enabled=args.fp16_train)
 
     def masked_mean(x, valid):
         x = x.masked_fill(~valid, 0)
         return x.sum() / valid.float().sum()
 
-    def train_step(agent, mb_obs, mb_actions, mb_logprobs, mb_advantages, mb_returns, mb_values):
-        _, newlogprob, entropy, newvalue, valid = agent.get_action_and_value(mb_obs, mb_actions.long())
+    def train_step(agent, scaler, mb_obs, mb_actions, mb_logprobs, mb_advantages, mb_returns, mb_values):
+        with autocast(enabled=args.fp16_train):
+            _, newlogprob, entropy, newvalue, valid = agent.get_action_and_value(mb_obs, mb_actions.long())
         logratio = newlogprob - mb_logprobs
         ratio = logratio.exp()
 
@@ -251,12 +265,20 @@ def run(local_rank, world_size):
         entropy_loss = masked_mean(entropy, valid)
         loss = pg_loss - args.ent_coef * entropy_loss + v_loss * args.vf_coef
         optimizer.zero_grad()
-        loss.backward()
+        scaler.scale(loss).backward()
+        scaler.unscale_(optimizer)
         reduce_gradidents(agent, args.world_size)
         return old_approx_kl, approx_kl, clipfrac, pg_loss, v_loss, entropy_loss
 
+    def predict_step(agent, next_obs):
+        with torch.no_grad():
+            with autocast(enabled=args.fp16_eval):
+                logits, values = agent(next_obs)
+        return logits, values
+
     if args.compile:
         train_step = torch.compile(train_step, mode=args.compile_mode)
+        predict_step = torch.compile(predict_step, mode=args.compile_mode)
 
     def to_tensor(x, dtype=torch.float32):
         return optree.tree_map(lambda x: torch.from_numpy(x).to(device=device, dtype=dtype, non_blocking=True), x)
@@ -296,8 +318,10 @@ def run(local_rank, world_size):
             dones[step] = next_done
 
             _start = time.time()
-            with torch.no_grad():
-                action, logprob, _, value, valid = agent.get_action_and_value(next_obs)
+            logits, value = predict_step(agent, next_obs)
+            probs = Categorical(logits=logits)
+            action = probs.sample()
+            logprob = probs.log_prob(action)
 
             values[step] = value.flatten()
             actions[step] = action
@@ -374,10 +398,11 @@ def run(local_rank, world_size):
                     k: v[mb_inds] for k, v in b_obs.items()
                 }
                 old_approx_kl, approx_kl, clipfrac, pg_loss, v_loss, entropy_loss = \
-                    train_step(agent, mb_obs, b_actions[mb_inds], b_logprobs[mb_inds], b_advantages[mb_inds],
+                    train_step(agent, scaler, mb_obs, b_actions[mb_inds], b_logprobs[mb_inds], b_advantages[mb_inds],
                             b_returns[mb_inds], b_values[mb_inds])
                 nn.utils.clip_grad_norm_(agent.parameters(), args.max_grad_norm)
-                optimizer.step()
+                scaler.step(optimizer)
+                scaler.update()
                 clipfracs.append(clipfrac.item())
 
             if args.target_kl is not None and approx_kl > args.target_kl:

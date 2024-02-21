@@ -39,6 +39,7 @@ def mp_start(run):
     if world_size == 1:
         run(local_rank=0, world_size=world_size)
     else:
+        mp.set_start_method('spawn')
         children = []
         for i in range(world_size):
             subproc = mp.Process(target=run, args=(i, world_size))

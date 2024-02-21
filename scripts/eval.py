@@ -14,7 +14,7 @@ import tyro
 
 from ygoai.utils import init_ygopro
 from ygoai.rl.utils import RecordEpisodeStatistics
-from ygoai.rl.agent import Agent
+from ygoai.rl.agent import PPOAgent as Agent
 from ygoai.rl.buffer import create_obs
 
 
@@ -171,8 +171,13 @@ if __name__ == "__main__":
             _start = time.time()
             obs = optree.tree_map(lambda x: torch.from_numpy(x).to(device=device), obs)
             with torch.no_grad():
-                values = agent(obs)[0]
-            actions = torch.argmax(values, dim=1).cpu().numpy()
+                logits, values = agent(obs)
+            probs = torch.softmax(logits, dim=-1)
+            probs = probs.cpu().numpy()
+            if args.play:
+                print(probs[probs != 0].tolist())
+                print(values)
+            actions = probs.argmax(axis=1)
             model_time += time.time() - _start
         else:
             if args.strategy == "random":
