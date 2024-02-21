@@ -27,6 +27,12 @@ def setup(backend, rank, world_size, port):
     os.environ['MASTER_PORT'] = str(port)
     dist.init_process_group(backend, rank=rank, world_size=world_size)
 
+    # manual init nccl
+    x = torch.rand(4, device=f'cuda:{rank}')
+    dist.all_reduce(x, op=dist.ReduceOp.SUM)
+    x.mean().item()
+    dist.barrier()
+
 
 def mp_start(run):
     world_size = int(os.getenv("WORLD_SIZE", "1"))
