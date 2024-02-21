@@ -50,7 +50,7 @@ class Args:
     """the embedding file for card embeddings"""
     max_options: int = 24
     """the maximum number of options"""
-    n_history_actions: int = 8
+    n_history_actions: int = 16
     """the number of history actions to use"""
     play_mode: str = "self"
     """the play mode, can be combination of 'self', 'bot', 'random', like 'self+bot'"""
@@ -60,7 +60,7 @@ class Args:
     num_channels: int = 128
     """the number of channels for the agent"""
 
-    total_timesteps: int = 100000000
+    total_timesteps: int = 1000000000
     """total timesteps of the experiments"""
     learning_rate: float = 2.5e-4
     """the learning rate of the optimizer"""
@@ -76,7 +76,7 @@ class Args:
     """the lambda for the general advantage estimation"""
     minibatch_size: int = 256
     """the mini-batch size"""
-    update_epochs: int = 4
+    update_epochs: int = 2
     """the K epochs to update the policy"""
     norm_adv: bool = True
     """Toggles advantages normalization"""
@@ -219,7 +219,7 @@ def run(local_rank, world_size):
     #     agent.get_action_and_value = torch.compile(agent.get_action_and_value, mode=args.compile_mode)
     optimizer = optim.Adam(agent.parameters(), lr=args.learning_rate, eps=1e-5)
 
-    scaler = GradScaler(enabled=args.fp16_train)
+    scaler = GradScaler(enabled=args.fp16_train, init_scale=2 ** 8)
 
     def masked_mean(x, valid):
         x = x.masked_fill(~valid, 0)

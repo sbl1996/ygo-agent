@@ -1516,9 +1516,9 @@ public:
       if (win_turn <= 5) {
         base_reward = 2.0;
       } else if (win_turn <= 3) {
-        base_reward = 4.0;
+        base_reward = 3.0;
       } else if (win_turn <= 1) {
-        base_reward = 8.0;
+        base_reward = 4.0;
       }
       if (play_mode_ == kSelfPlay) {
         // to_play_ is the previous player

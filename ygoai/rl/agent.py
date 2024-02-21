@@ -304,7 +304,12 @@ class Encoder(nn.Module):
                 f_actions = layer(f_actions, f_h_actions)
 
         f_actions = self.action_norm(f_actions)
-        return f_actions, mask, valid
+
+        f_s_cards_global = f_cards.mean(dim=1)
+        c_mask = 1 - mask.unsqueeze(-1).float()
+        f_s_actions_ha = (f_actions * c_mask).sum(dim=1) / c_mask.sum(dim=1)
+        f_state = torch.cat([f_s_cards_global, f_s_actions_ha], dim=-1)
+        return f_actions, f_state, mask, valid
 
 
 class PPOAgent(nn.Module):
@@ -324,67 +329,32 @@ class PPOAgent(nn.Module):
         )
 
         self.critic = nn.Sequential(
-            nn.Linear(c, c // 4),
+            nn.Linear(c * 2, c // 2),
             nn.ReLU(),
-            nn.Linear(c // 4, 1),
+            nn.Linear(c // 2, 1),
         )
 
     def load_embeddings(self, embeddings, freeze=True):
         self.encoder.load_embeddings(embeddings, freeze)
 
-
     def get_value(self, x):
-        f_actions, mask, valid = self.encoder(x)
-        c_mask = 1 - mask.unsqueeze(-1).float()
-        f = (f_actions * c_mask).sum(dim=1) / c_mask.sum(dim=1)
-        return self.critic(f)
+        f_actions, f_state, mask, valid = self.encoder(x)
+        return self.critic(f_state)
 
     def get_action_and_value(self, x, action):
-        f_actions, mask, valid = self.encoder(x)
-        c_mask = 1 - mask.unsqueeze(-1).float()
-        f = (f_actions * c_mask).sum(dim=1) / c_mask.sum(dim=1)
+        f_actions, f_state, mask, valid = self.encoder(x)
 
         logits = self.actor(f_actions)[..., 0]
         logits = logits.float()
         logits = logits.masked_fill(mask, float("-inf"))
 
         probs = Categorical(logits=logits)
-        return action, probs.log_prob(action), probs.entropy(), self.critic(f), valid
+        return action, probs.log_prob(action), probs.entropy(), self.critic(f_state), valid
 
     def forward(self, x):
-        f_actions, mask, valid = self.encoder(x)
-        c_mask = 1 - mask.unsqueeze(-1).float()
-        f = (f_actions * c_mask).sum(dim=1) / c_mask.sum(dim=1)
+        f_actions, f_state, mask, valid = self.encoder(x)
 
         logits = self.actor(f_actions)[..., 0]
         logits = logits.float()
         logits = logits.masked_fill(mask, float("-inf"))
-        return logits, self.critic(f)
-
-
-class DMCAgent(nn.Module):
-
-    def __init__(self, channels=128, num_card_layers=2, num_action_layers=2,
-                 num_history_action_layers=2, embedding_shape=None, bias=False, affine=True):
-        super(DMCAgent, self).__init__()
-
-        self.encoder = Encoder(
-            channels, num_card_layers, num_action_layers, num_history_action_layers, embedding_shape, bias, affine)
-
-        c = channels
-        self.value_head = nn.Sequential(
-            nn.Linear(c, c // 4),
-            nn.ReLU(),
-            nn.Linear(c // 4, 1),
-        )
-
-    def load_embeddings(self, embeddings, freeze=True):
-        self.encoder.load_embeddings(embeddings, freeze)
-
-    def forward(self, x):
-        f_actions, mask, valid = self.encoder(f_actions)
-        values = self.value_head(f_actions)[..., 0]
-        # values = torch.tanh(values)
-        values = torch.where(mask, torch.full_like(values, -10), values)
-        return values, valid
-    
+        return logits, self.critic(f_state)
