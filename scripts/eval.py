@@ -41,7 +41,7 @@ class Args:
     """the language to use"""
     max_options: int = 24
     """the maximum number of options"""
-    n_history_actions: int = 8
+    n_history_actions: int = 16
     """the number of history actions to use"""
 
     player: int = -1
@@ -71,7 +71,7 @@ class Args:
     """the number of channels for the agent"""
     checkpoint: str = "checkpoints/agent.pt"
     """the checkpoint to load"""
-    embedding_file: str = "embeddings_en.npy"
+    embedding_file: Optional[str] = "embeddings_en.npy"
     """the embedding file for card embeddings"""
 
     compile: bool = False
@@ -130,9 +130,13 @@ if __name__ == "__main__":
     envs = RecordEpisodeStatistics(envs)
 
     if args.agent:
-        embeddings = np.load(args.embedding_file)
+        if args.embedding_file:
+            embeddings = np.load(args.embedding_file)
+            embedding_shape = embeddings.shape
+        else:
+            embedding_shape = None
         L = args.num_layers
-        agent = Agent(args.num_channels, L, L, 1, embeddings.shape).to(device)
+        agent = Agent(args.num_channels, L, L, 1, embedding_shape).to(device)
         agent = agent.eval()
         state_dict = torch.load(args.checkpoint, map_location=device)
 
