@@ -2,9 +2,11 @@
 #define YGOENV_YGOPRO_YGOPRO_H_
 
 // clang-format off
+#include <cstdio>
 #include <numeric>
 #include <stdexcept>
 #include <string>
+#include <cstring>
 #include <fstream>
 #include <shared_mutex>
 #include <iostream>
@@ -724,6 +726,34 @@ static std::vector<int> find_substrs(const std::string &str,
   return res;
 }
 
+// from ygopro/gframe/replay.h
+
+// replay flag
+#define REPLAY_COMPRESSED	0x1
+#define REPLAY_TAG			0x2
+#define REPLAY_DECODED		0x4
+#define REPLAY_SINGLE_MODE	0x8
+#define REPLAY_UNIFORM		0x10
+
+// max size
+#define MAX_REPLAY_SIZE	0x20000
+
+
+struct ReplayHeader {
+	unsigned int id;
+	unsigned int version;
+	unsigned int flag;
+	unsigned int seed;
+	unsigned int datasize;
+	unsigned int start_time;
+	unsigned char props[8];
+
+	ReplayHeader()
+		: id(0), version(0), flag(0), seed(0), datasize(0), start_time(0), props{ 0 } {}
+};
+
+// from ygopro/gframe/replay.h
+
 using PlayerId = uint8_t;
 using CardCode = uint32_t;
 using CardId = uint16_t;
@@ -1181,7 +1211,7 @@ public:
                     "play_mode"_.Bind(std::string("bot")),
                     "verbose"_.Bind(false), "max_options"_.Bind(16),
                     "max_cards"_.Bind(75), "n_history_actions"_.Bind(16),
-                    "max_multi_select"_.Bind(5));
+                    "max_multi_select"_.Bind(5), "record"_.Bind(false));
   }
   template <typename Config>
   static decltype(auto) StateSpec(const Config &conf) {
@@ -1234,6 +1264,14 @@ inline std::vector<PlayMode> parse_play_modes(const std::string &play_mode) {
   }
   return modes;
 }
+
+// rules = 1, Traditional
+// rules = 0, Default
+// rules = 4, Link
+// rules = 5, MR5
+constexpr int32_t rules_ = 5;
+constexpr int32_t duel_options_ = ((rules_ & 0xFF) << 16) + (0 & 0xFFFF);
+
 
 class YGOProEnv : public Env<YGOProEnvSpec> {
 protected:
@@ -1317,6 +1355,13 @@ protected:
   // discard hand cards
   bool discard_hand_ = false;
 
+  // replay
+  bool record_ = false;
+  // uint8_t *replay_data_;
+  // uint8_t *rdata_;
+  FILE* fp_;
+  bool is_recording = false;
+
 public:
   YGOProEnv(const Spec &spec, int env_id)
       : Env<YGOProEnvSpec>(spec, env_id),
@@ -1325,8 +1370,16 @@ public:
         deck1_(spec.config["deck1"_]), deck2_(spec.config["deck2"_]),
         player_(spec.config["player"_]),
         play_modes_(parse_play_modes(spec.config["play_mode"_])),
-        verbose_(spec.config["verbose"_]),
+        verbose_(spec.config["verbose"_]), record_(spec.config["record"_]),
         n_history_actions_(spec.config["n_history_actions"_]) {
+    if (record_) {
+      if (!verbose_) {
+        throw std::runtime_error("record mode must be used with verbose mode and num_envs=1");
+      }
+      // replay_data_ = new uint8_t[MAX_REPLAY_SIZE];
+      // rdata_ = replay_data_;
+    }
+
     int max_options = spec.config["max_options"_];
     int n_action_feats = spec.state_spec["obs:actions_"_].shape[1];
     h_card_ids_0_.resize(max_options);
@@ -1338,6 +1391,9 @@ public:
   }
 
   ~YGOProEnv() {
+    if (record_) {
+      // delete[] replay_data_;
+    }
     for (int i = 0; i < 2; i++) {
       if (players_[i] != nullptr) {
         delete players_[i];
@@ -1374,6 +1430,23 @@ public:
       }
     }
 
+    if (record_) {
+      if (is_recording && fp_ != nullptr) {
+        fclose(fp_);
+      }
+      auto now = std::chrono::system_clock::now().time_since_epoch();
+      auto now_seconds =
+          std::chrono::duration_cast<std::chrono::seconds>(now).count();
+      auto fname = fmt::format("./replay/{}.yrp", now_seconds);
+      fp_ = fopen(fname.c_str(), "wb");
+      if (!fp_) {
+        throw std::runtime_error("Failed to open file for replay: " + fname);
+      }
+
+      // rdata_ = replay_data_;
+      is_recording = true;
+    }
+
     turn_count_ = 0;
 
     history_actions_0_.Zero();
@@ -1406,13 +1479,7 @@ public:
       lp_[i] = players_[i]->init_lp_;
     }
 
-    // rules = 1, Traditional
-    // rules = 0, Default
-    // rules = 4, Link
-    // rules = 5, MR5
-    int32_t rules = 5;
-    int32_t options = ((rules & 0xFF) << 16) + (0 & 0xFFFF);
-    OCG_StartDuel(pduel_, options);
+    OCG_StartDuel(pduel_, duel_options_);
     duel_started_ = true;
     winner_ = 255;
     win_reason_ = 255;
@@ -1873,16 +1940,63 @@ private:
     }
   }
 
+
+  void str_to_uint16(const char* src, uint16_t* dest) {
+      for (int i = 0; i < strlen(src); i += 2) {
+          dest[i / 2] = src[i] | (src[i + 1] << 8);
+      }
+      // Add null terminator
+      dest[(strlen(src) + 1) / 2] = '\0';
+  }
+
+  void ReplayWriteInt8(int8_t value) {
+    fwrite(&value, sizeof(value), 1, fp_);
+  }
+
+  void ReplayWriteInt32(int32_t value) {
+    fwrite(&value, sizeof(value), 1, fp_);
+  }
+
   // ygopro-core API
   intptr_t OCG_CreateDuel(uint_fast32_t seed) {
+    if (record_) {
+      ReplayHeader rh;
+      rh.id = 0x31707279;
+      rh.version = 0x00001360;
+      rh.flag = REPLAY_UNIFORM;
+      rh.seed = seed;
+      rh.start_time = (unsigned int)time(nullptr);
+      fwrite(&rh, sizeof(rh), 1, fp_);
+      fflush(fp_);
+    }
     return create_duel(seed);
   }
 
   void OCG_SetPlayerInfo(intptr_t pduel, int32 playerid, int32 lp, int32 startcount, int32 drawcount) {
+    if (record_ && playerid == 0) {
+      {
+        uint16_t name[20];
+        str_to_uint16("Alice", name);
+        fwrite(name, 40, 1, fp_);
+      }
+      {
+        uint16_t name[20];
+        str_to_uint16("Bob", name);
+        fwrite(name, 40, 1, fp_);
+      }
+
+      ReplayWriteInt32(lp);
+      ReplayWriteInt32(startcount);
+      ReplayWriteInt32(drawcount);
+      ReplayWriteInt32(duel_options_);
+    }
     set_player_info(pduel, playerid, lp, startcount, drawcount);
   }
 
   void OCG_NewCard(intptr_t pduel, uint32 code, uint8 owner, uint8 playerid, uint8 location, uint8 sequence, uint8 position) {
+    if (record_) {
+      ReplayWriteInt32(code);
+    }
     new_card(pduel, code, owner, playerid, location, sequence, position);
   }
 
@@ -1915,10 +2029,18 @@ private:
   }
 
   void OCG_SetResponsei(intptr_t pduel, int32 value) {
+    if (record_) {
+      ReplayWriteInt32(4);
+      ReplayWriteInt32(value);
+    }
     set_responsei(pduel, value);
   }
 
   void OCG_SetResponseb(intptr_t pduel, byte* buf) {
+    if (record_) {
+      ReplayWriteInt8(buf[0]);
+      fwrite(buf + 1, buf[0], 1, fp_);
+    }
     set_responseb(pduel, buf);
   }
 
@@ -2020,9 +2142,17 @@ private:
 
     // add main deck in reverse order following ygopro
     // but since we have shuffled deck, so just add in order
+    if (record_) {
+      ReplayWriteInt32(main_deck.size());
+    }
+
     for (int i = 0; i < main_deck.size(); i++) {
       OCG_NewCard(pduel_, main_deck[i], player, player, LOCATION_DECK, 0,
                POS_FACEDOWN_DEFENSE);
+    }
+
+    if (record_) {
+      ReplayWriteInt32(extra_deck.size());
     }
 
     // add extra deck in reverse order following ygopro
