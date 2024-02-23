@@ -1359,7 +1359,7 @@ protected:
   bool record_ = false;
   // uint8_t *replay_data_;
   // uint8_t *rdata_;
-  FILE* fp_;
+  FILE* fp_ = nullptr;
   bool is_recording = false;
 
 public:
@@ -1454,7 +1454,7 @@ public:
     ha_p_0_ = 0;
     ha_p_1_ = 0;
 
-    unsigned long duel_seed = dist_int_(gen_);
+    auto duel_seed = dist_int_(gen_);
 
     std::unique_lock<std::shared_timed_mutex> ulock(duel_mtx);
     pduel_ = OCG_CreateDuel(duel_seed);
@@ -1580,12 +1580,12 @@ public:
     if (done_) {
       float base_reward = 1.0;
       int win_turn = turn_count_ - winner_;
-      if (win_turn <= 5) {
-        base_reward = 2.0;
+      if (win_turn <= 1) {
+        base_reward = 4.0;
       } else if (win_turn <= 3) {
         base_reward = 3.0;
-      } else if (win_turn <= 1) {
-        base_reward = 4.0;
+      } else if (win_turn <= 5) {
+        base_reward = 2.0;
       }
       if (play_mode_ == kSelfPlay) {
         // to_play_ is the previous player
@@ -1598,6 +1598,14 @@ public:
         reason = 1;
       } else if (win_reason_ == 0x02) {
         reason = -1;
+      }
+
+      if (record_) {
+        if (!is_recording || fp_ == nullptr) {
+          throw std::runtime_error("Recording is not started");
+        }
+        fclose(fp_);
+        is_recording = false;
       }
     }
 
@@ -1942,11 +1950,12 @@ private:
 
 
   void str_to_uint16(const char* src, uint16_t* dest) {
-      for (int i = 0; i < strlen(src); i += 2) {
-          dest[i / 2] = src[i] | (src[i + 1] << 8);
+      for (int i = 0; i < strlen(src); i += 1) {
+        dest[i] = src[i];
       }
+
       // Add null terminator
-      dest[(strlen(src) + 1) / 2] = '\0';
+      dest[strlen(src) + 1] = '\0';
   }
 
   void ReplayWriteInt8(int8_t value) {
@@ -1958,7 +1967,7 @@ private:
   }
 
   // ygopro-core API
-  intptr_t OCG_CreateDuel(uint_fast32_t seed) {
+  intptr_t OCG_CreateDuel(uint32_t seed) {
     if (record_) {
       ReplayHeader rh;
       rh.id = 0x31707279;
@@ -1969,18 +1978,21 @@ private:
       fwrite(&rh, sizeof(rh), 1, fp_);
       fflush(fp_);
     }
-    return create_duel(seed);
+    std::mt19937 rnd(seed);
+    return create_duel(rnd());
   }
 
   void OCG_SetPlayerInfo(intptr_t pduel, int32 playerid, int32 lp, int32 startcount, int32 drawcount) {
     if (record_ && playerid == 0) {
       {
         uint16_t name[20];
+        memset(name, 0, 40);
         str_to_uint16("Alice", name);
         fwrite(name, 40, 1, fp_);
       }
       {
         uint16_t name[20];
+        memset(name, 0, 40);
         str_to_uint16("Bob", name);
         fwrite(name, 40, 1, fp_);
       }
@@ -2030,7 +2042,7 @@ private:
 
   void OCG_SetResponsei(intptr_t pduel, int32 value) {
     if (record_) {
-      ReplayWriteInt32(4);
+      ReplayWriteInt8(4);
       ReplayWriteInt32(value);
     }
     set_responsei(pduel, value);
@@ -2038,8 +2050,21 @@ private:
 
   void OCG_SetResponseb(intptr_t pduel, byte* buf) {
     if (record_) {
-      ReplayWriteInt8(buf[0]);
-      fwrite(buf + 1, buf[0], 1, fp_);
+      switch (msg_) {
+        case MSG_SORT_CARD:
+          ReplayWriteInt8(1);
+          fwrite(buf, 1, 1, fp_);
+          break;
+        case MSG_SELECT_PLACE:
+        case MSG_SELECT_DISFIELD:
+          ReplayWriteInt8(3);
+          fwrite(buf, 3, 1, fp_);
+          break;
+        default:
+          ReplayWriteInt8(buf[0] + 1);
+          fwrite(buf, buf[0] + 1, 1, fp_);
+          break;
+      }
     }
     set_responseb(pduel, buf);
   }

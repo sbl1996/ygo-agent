@@ -50,6 +50,8 @@ class Args:
     """whether to play the game"""
     selfplay: bool = False
     """whether to use selfplay"""
+    record: bool = False
+    """whether to record the game as YGOPro replays"""
 
     num_episodes: int = 1024
     """the number of episodes to run""" 
@@ -87,6 +89,10 @@ if __name__ == "__main__":
     if args.play:
         args.num_envs = 1
         args.verbose = True
+    
+    if args.record:
+        assert args.num_envs == 1, "Recording only works with a single environment"
+        assert args.verbose, "Recording only works with verbose mode"
 
     args.env_threads = min(args.env_threads or args.num_envs, args.num_envs)
     args.torch_threads = args.torch_threads or int(os.getenv("OMP_NUM_THREADS", "4"))
@@ -125,6 +131,7 @@ if __name__ == "__main__":
         n_history_actions=args.n_history_actions,
         play_mode='human' if args.play else ('self' if args.selfplay else ('bot' if args.bot_type == "greedy" else "random")),
         verbose=args.verbose,
+        record=args.record,
     )
     envs.num_envs = num_envs
     envs = RecordEpisodeStatistics(envs)

@@ -112,8 +112,10 @@ class Args:
     """tensorboard log directory"""
     ckpt_dir: str = "./checkpoints"
     """checkpoint directory"""
-    save_interval: int = 100
+    save_interval: int = 1000
     """the number of iterations to save the model"""
+    log_p: float = 0.1
+    """the probability of logging"""
     port: int = 12355
     """the port to use for distributed training"""
 
@@ -339,7 +341,7 @@ def run(local_rank, world_size):
                 continue
 
             for idx, d in enumerate(next_done_):
-                if d:
+                if d and random.random() < args.log_p:
                     episode_length = info['l'][idx]
                     episode_reward = info['r'][idx]
                     writer.add_scalar("charts/episodic_return", info["r"][idx], global_step)
@@ -420,7 +422,7 @@ def run(local_rank, world_size):
         # TRY NOT TO MODIFY: record rewards for plotting purposes
         if local_rank == 0:
             if iteration % args.save_interval == 0:
-                torch.save(agent.state_dict(), os.path.join(ckpt_dir, f"{iteration}.pth"))
+                torch.save(agent.state_dict(), os.path.join(ckpt_dir, f"agent.pth"))
 
             writer.add_scalar("charts/learning_rate", optimizer.param_groups[0]["lr"], global_step)
             writer.add_scalar("losses/value_loss", v_loss.item(), global_step)
