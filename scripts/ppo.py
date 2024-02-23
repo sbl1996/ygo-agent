@@ -421,7 +421,7 @@ def run(local_rank, world_size):
 
         # TRY NOT TO MODIFY: record rewards for plotting purposes
         if local_rank == 0:
-            if iteration % args.save_interval == 0:
+            if iteration % args.save_interval == 0 or iteration == args.num_iterations:
                 torch.save(agent.state_dict(), os.path.join(ckpt_dir, f"agent.pth"))
 
             writer.add_scalar("charts/learning_rate", optimizer.param_groups[0]["lr"], global_step)
