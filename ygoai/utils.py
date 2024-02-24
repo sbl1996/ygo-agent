@@ -7,10 +7,9 @@ from ygoenv.ygopro import init_module
 def load_deck(fn):
     with open(fn) as f:
         lines = f.readlines()
-        noside = itertools.takewhile(lambda x: "side" not in x, lines)
-        deck = [int(line) for line in  noside if line[:-1].isdigit()]
+        deck = [int(line) for line in  lines if line[:-1].isdigit()]
         return deck
-	
+
 
 def get_root_directory():
 	cur = Path(__file__).resolve()
@@ -25,7 +24,7 @@ _languages = {
     "chinese": "zh",
 }
 
-def init_ygopro(lang, deck, code_list_file, preload_tokens=True):
+def init_ygopro(lang, deck, code_list_file, preload_tokens=False):
 	short = _languages[lang]
 	db_path = Path(get_root_directory(), 'assets', 'locale', short, 'cards.cdb')
 	deck_fp = Path(deck)

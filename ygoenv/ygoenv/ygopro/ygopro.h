@@ -2,6 +2,7 @@
 #define YGOENV_YGOPRO_YGOPRO_H_
 
 // clang-format off
+#include <algorithm>
 #include <cstdio>
 #include <numeric>
 #include <stdexcept>
@@ -303,7 +304,9 @@ static const ankerl::unordered_dense::map<int, std::string> system_strings = {
     {221, "On [%ls], Activate Trigger Effect of [%ls]?"},
     {1190, "Add to hand"},
     {1192, "Banish"},
-    {1622, "[%ls] Missed timing"}};
+    {1621, "Attack Negated"},
+    {1622, "[%ls] Missed timing"}
+};
 
 static std::string get_system_string(int desc) {
   auto it = system_strings.find(desc);
@@ -433,56 +436,55 @@ inline std::string code_to_spec(uint32_t spec_code) {
   return ls_to_spec(loc, seq, pos, opponent);
 }
 
-static std::vector<uint32> read_main_deck(const std::string &fp) {
+static std::tuple<std::vector<uint32>, std::vector<uint32>, std::vector<uint32>> read_decks(const std::string &fp) {
   std::ifstream file(fp);
   std::string line;
-  std::vector<uint32> deck;
+  std::vector<uint32> main_deck, extra_deck, side_deck;
+  bool found_extra = false;
 
   if (file.is_open()) {
-    while (std::getline(file, line)) {
-      if ((line.find("side") != std::string::npos) ||
-          line.find("extra") != std::string::npos) {
-        break;
-      }
-      // Check if line contains only digits
-      if (std::all_of(line.begin(), line.end(), ::isdigit)) {
-        deck.push_back(std::stoul(line));
-      }
-    }
-    file.close();
-  } else {
-    throw std::runtime_error(fmt::format("Unable to open deck file: {}", fp));
-  }
-  return deck;
-}
-
-static std::vector<uint32> read_extra_deck(const std::string &fp) {
-  std::ifstream file(fp);
-  std::string line;
-  std::vector<uint32> deck;
-
-  if (file.is_open()) {
-    while (std::getline(file, line)) {
-      if (line.find("extra") != std::string::npos) {
-        break;
-      }
-    }
-
+    // Read the main deck
     while (std::getline(file, line)) {
       if (line.find("side") != std::string::npos) {
         break;
       }
+      if (line.find("extra") != std::string::npos) {
+        found_extra = true;
+        break;
+      }
       // Check if line contains only digits
       if (std::all_of(line.begin(), line.end(), ::isdigit)) {
-        deck.push_back(std::stoul(line));
+        main_deck.push_back(std::stoul(line));
       }
     }
+
+    // Read the extra deck
+    if (found_extra) {
+      while (std::getline(file, line)) {
+        if (line.find("side") != std::string::npos) {
+          break;
+        }
+        // Check if line contains only digits
+        if (std::all_of(line.begin(), line.end(), ::isdigit)) {
+          extra_deck.push_back(std::stoul(line));
+        }
+      }
+    }
+
+    // Read the side deck
+    while (std::getline(file, line)) {
+      // Check if line contains only digits
+      if (std::all_of(line.begin(), line.end(), ::isdigit)) {
+        side_deck.push_back(std::stoul(line));
+      }
+    }
+
     file.close();
   } else {
     throw std::runtime_error(fmt::format("Unable to open deck file: {}", fp));
   }
 
-  return deck;
+  return std::make_tuple(main_deck, extra_deck, side_deck);
 }
 
 template <class K = uint8_t>
@@ -668,7 +670,7 @@ static const std::vector<int> _msgs = {
     MSG_SELECT_TRIBUTE,  MSG_SELECT_POSITION,  MSG_SELECT_EFFECTYN,
     MSG_SELECT_YESNO,    MSG_SELECT_BATTLECMD, MSG_SELECT_UNSELECT_CARD,
     MSG_SELECT_OPTION,   MSG_SELECT_PLACE,     MSG_SELECT_SUM,
-    MSG_SELECT_DISFIELD, MSG_ANNOUNCE_ATTRIB,
+    MSG_SELECT_DISFIELD, MSG_ANNOUNCE_ATTRIB,  MSG_ANNOUNCE_NUMBER,
 };
 
 static const ankerl::unordered_dense::map<int, uint8_t> msg2id =
@@ -726,6 +728,15 @@ static std::vector<int> find_substrs(const std::string &str,
   return res;
 }
 
+inline std::string time_now() {
+  // strftime %Y-%m-%d %H-%M-%S
+  time_t now = time(0);
+  tm *ltm = localtime(&now);
+  char buffer[80];
+  strftime(buffer, 80, "%Y-%m-%d %H-%M-%S", ltm);
+  return std::string(buffer);
+}
+
 // from ygopro/gframe/replay.h
 
 // replay flag
@@ -762,7 +773,7 @@ class Card {
   friend class YGOProEnv;
 
 protected:
-  CardCode code_;
+  CardCode code_ = 0;
   uint32_t alias_;
   uint64_t setcode_;
   uint32_t type_;
@@ -785,6 +796,7 @@ protected:
   uint32_t location_ = 0;
   uint32_t sequence_ = 0;
   uint32_t position_ = 0;
+  uint32_t counter_ = 0;
 
 public:
   Card() = default;
@@ -872,7 +884,7 @@ inline Card db_query_card(const SQLite::Database &db, CardCode code) {
   query1.bind(1, code);
   bool found = query1.executeStep();
   if (!found) {
-    std::string msg = "Card not found: " + std::to_string(code);
+    std::string msg = "[db_query_card] Card not found: " + std::to_string(code);
     throw std::runtime_error(msg);
   }
 
@@ -1020,7 +1032,7 @@ inline void preload_deck(const SQLite::Database &db,
 inline uint32 card_reader_callback(CardCode code, card_data *card) {
   auto it = cards_data_.find(code);
   if (it == cards_data_.end()) {
-    throw std::runtime_error("Card not found: " + std::to_string(code));
+    throw std::runtime_error("[card_reader_callback] Card not found: " + std::to_string(code));
   }
   *card = it->second;
   return 0;
@@ -1077,8 +1089,7 @@ static void init_module(const std::string &db_path,
   SQLite::Database db(db_path, SQLite::OPEN_READONLY);
 
   for (const auto &[name, deck] : decks) {
-    std::vector<CardCode> main_deck = read_main_deck(deck);
-    std::vector<CardCode> extra_deck = read_extra_deck(deck);
+    auto [main_deck, extra_deck, side_deck] = read_decks(deck);
     main_decks_[name] = main_deck;
     extra_decks_[name] = extra_deck;
     if (name[0] != '_') {
@@ -1087,6 +1098,7 @@ static void init_module(const std::string &db_path,
 
     preload_deck(db, main_deck);
     preload_deck(db, extra_deck);
+    preload_deck(db, side_deck);
   }
 
   for (auto &[name, deck] : extra_decks_) {
@@ -1215,9 +1227,9 @@ public:
   }
   template <typename Config>
   static decltype(auto) StateSpec(const Config &conf) {
-    int n_action_feats = 9 + conf["max_multi_select"_] * 2;
+    int n_action_feats = 10 + conf["max_multi_select"_] * 2;
     return MakeDict(
-        "obs:cards_"_.Bind(Spec<uint8_t>({conf["max_cards"_] * 2, 39})),
+        "obs:cards_"_.Bind(Spec<uint8_t>({conf["max_cards"_] * 2, 40})),
         "obs:global_"_.Bind(Spec<uint8_t>({9})),
         "obs:actions_"_.Bind(
             Spec<uint8_t>({conf["max_options"_], n_action_feats})),
@@ -1281,6 +1293,9 @@ protected:
   std::vector<uint32> main_deck1_;
   std::vector<uint32> extra_deck0_;
   std::vector<uint32> extra_deck1_;
+
+  std::string deck_name_[2] = {"", ""};
+  std::string nickname_[2] = {"Alice", "Bob"};
 
   const std::vector<PlayMode> play_modes_;
 
@@ -1391,9 +1406,6 @@ public:
   }
 
   ~YGOProEnv() {
-    if (record_) {
-      // delete[] replay_data_;
-    }
     for (int i = 0; i < 2; i++) {
       if (players_[i] != nullptr) {
         delete players_[i];
@@ -1430,23 +1442,6 @@ public:
       }
     }
 
-    if (record_) {
-      if (is_recording && fp_ != nullptr) {
-        fclose(fp_);
-      }
-      auto now = std::chrono::system_clock::now().time_since_epoch();
-      auto now_seconds =
-          std::chrono::duration_cast<std::chrono::seconds>(now).count();
-      auto fname = fmt::format("./replay/{}.yrp", now_seconds);
-      fp_ = fopen(fname.c_str(), "wb");
-      if (!fp_) {
-        throw std::runtime_error("Failed to open file for replay: " + fname);
-      }
-
-      // rdata_ = replay_data_;
-      is_recording = true;
-    }
-
     turn_count_ = 0;
 
     history_actions_0_.Zero();
@@ -1460,23 +1455,94 @@ public:
     pduel_ = OCG_CreateDuel(duel_seed);
     ulock.unlock();
 
+    int init_lp = 8000;
+    int startcount = 5;
+    int drawcount = 1;
     for (PlayerId i = 0; i < 2; i++) {
       if (players_[i] != nullptr) {
         delete players_[i];
       }
       std::string nickname = i == 0 ? "Alice" : "Bob";
-      int init_lp = 8000;
+      if (i == ai_player_) {
+        nickname = "Agent";
+      }
+      nickname_[i] = nickname;
       if ((play_mode_ == kHuman) && (i != ai_player_)) {
-        players_[i] = new HumanPlayer(nickname, init_lp, i, verbose_);
+        players_[i] = new HumanPlayer(nickname_[i], init_lp, i, verbose_);
       } else if (play_mode_ == kRandomBot) {
-        players_[i] = new RandomAI(max_options(), dist_int_(gen_), nickname,
+        players_[i] = new RandomAI(max_options(), dist_int_(gen_), nickname_[i],
                                    init_lp, i, verbose_);
       } else {
-        players_[i] = new GreedyAI(nickname, init_lp, i, verbose_);
+        players_[i] = new GreedyAI(nickname_[i], init_lp, i, verbose_);
       }
-      OCG_SetPlayerInfo(pduel_, i, init_lp, 5, 1);
+      OCG_SetPlayerInfo(pduel_, i, init_lp, startcount, drawcount);
       load_deck(i);
       lp_[i] = players_[i]->init_lp_;
+    }
+
+    if (record_) {
+      if (is_recording && fp_ != nullptr) {
+        fclose(fp_);
+      }
+      auto time_str = time_now();
+      // Use last 4 digits of seed as unique id
+      auto seed_ = duel_seed % 10000;
+      std::string fname;
+      while (true) {
+        fname = fmt::format("./replay/a{} {:04d}.yrp", time_str, seed_);
+        // check existence
+        if (std::filesystem::exists(fname)) {
+          seed_ = (seed_ + 1) % 10000;
+        } else {
+          break;
+        } 
+      }
+      fp_ = fopen(fname.c_str(), "wb");
+      if (!fp_) {
+        throw std::runtime_error("Failed to open file for replay: " + fname);
+      }
+
+      is_recording = true;
+
+      ReplayHeader rh;
+      rh.id = 0x31707279;
+      rh.version = 0x00001360;
+      rh.flag = REPLAY_UNIFORM;
+      rh.seed = duel_seed;
+      rh.start_time = (unsigned int)time(nullptr);
+      fwrite(&rh, sizeof(rh), 1, fp_);
+
+      for (PlayerId i = 0; i < 2; i++) {
+        uint16_t name[20];
+        memset(name, 0, 40);
+        std::string name_str = fmt::format("{} {}", nickname_[i], deck_name_[i]);
+        if (name_str.size() > 20) {
+          // truncate
+          name_str = name_str.substr(0, 20);
+        }
+        fmt::println("name: {}", name_str);
+        str_to_uint16(name_str.c_str(), name);
+        fwrite(name, 40, 1, fp_);
+      }
+
+      ReplayWriteInt32(init_lp);
+      ReplayWriteInt32(startcount);
+      ReplayWriteInt32(drawcount);
+      ReplayWriteInt32(duel_options_);
+
+      for (PlayerId i = 0; i < 2; i++) {
+        auto &main_deck = i == 0 ? main_deck0_ : main_deck1_;
+        auto &extra_deck = i == 0 ? extra_deck0_ : extra_deck1_;
+        ReplayWriteInt32(main_deck.size());
+        for (auto code : main_deck) {
+          ReplayWriteInt32(code);
+        }
+        ReplayWriteInt32(extra_deck.size());
+        for (int i = extra_deck.size() - 1; i >= 0; --i) {
+          ReplayWriteInt32(extra_deck[i]);
+        }
+      }
+
     }
 
     OCG_StartDuel(pduel_, duel_options_);
@@ -1581,11 +1647,13 @@ public:
       float base_reward = 1.0;
       int win_turn = turn_count_ - winner_;
       if (win_turn <= 1) {
-        base_reward = 4.0;
+        base_reward = 8.0;
       } else if (win_turn <= 3) {
-        base_reward = 3.0;
+        base_reward = 4.0;
       } else if (win_turn <= 5) {
         base_reward = 2.0;
+      } else {
+        base_reward = 0.5 + 1.0 / (win_turn - 5);
       }
       if (play_mode_ == kSelfPlay) {
         // to_play_ is the previous player
@@ -1707,17 +1775,18 @@ private:
       f_cards(offset, 7) = attribute2id.at(c.attribute_);
       f_cards(offset, 8) = race2id.at(c.race_);
       f_cards(offset, 9) = c.level_;
+      f_cards(offset, 10) = std::min(c.counter_, static_cast<uint32_t>(15));
       auto [atk1, atk2] = float_transform(c.attack_);
-      f_cards(offset, 10) = atk1;
-      f_cards(offset, 11) = atk2;
+      f_cards(offset, 11) = atk1;
+      f_cards(offset, 12) = atk2;
 
       auto [def1, def2] = float_transform(c.defense_);
-      f_cards(offset, 12) = def1;
-      f_cards(offset, 13) = def2;
+      f_cards(offset, 13) = def1;
+      f_cards(offset, 14) = def2;
 
       auto type_ids = type_to_ids(c.type_);
       for (int j = 0; j < type_ids.size(); ++j) {
-        f_cards(offset, 14 + j) = type_ids[j];
+        f_cards(offset, 15 + j) = type_ids[j];
       }
     }
   }
@@ -1784,13 +1853,17 @@ private:
     feat(i, _obs_action_feat_offset() + 6) = option - '0';
   }
 
+  void _set_obs_action_number(TArray<uint8_t> &feat, int i, char number) {
+    feat(i, _obs_action_feat_offset() + 7) = number - '0';
+  }
+
   void _set_obs_action_place(TArray<uint8_t> &feat, int i,
                              const std::string &spec) {
-    feat(i, _obs_action_feat_offset() + 7) = cmd_place2id.at(spec);
+    feat(i, _obs_action_feat_offset() + 8) = cmd_place2id.at(spec);
   }
 
   void _set_obs_action_attrib(TArray<uint8_t> &feat, int i, uint8_t attrib) {
-    feat(i, _obs_action_feat_offset() + 8) = attribute2id.at(attrib);
+    feat(i, _obs_action_feat_offset() + 9) = attribute2id.at(attrib);
   }
 
   void _set_obs_action(TArray<uint8_t> &feat, int i, int msg,
@@ -1882,6 +1955,8 @@ private:
       _set_obs_action_place(feat, i, option);
     } else if (msg == MSG_ANNOUNCE_ATTRIB) {
       _set_obs_action_attrib(feat, i, 1 << (option[0] - '1'));
+    } else if (msg == MSG_ANNOUNCE_NUMBER) {
+      _set_obs_action_number(feat, i, option[0]);
     } else {
       throw std::runtime_error("Unsupported message " + std::to_string(msg));
     }
@@ -1968,47 +2043,15 @@ private:
 
   // ygopro-core API
   intptr_t OCG_CreateDuel(uint32_t seed) {
-    if (record_) {
-      ReplayHeader rh;
-      rh.id = 0x31707279;
-      rh.version = 0x00001360;
-      rh.flag = REPLAY_UNIFORM;
-      rh.seed = seed;
-      rh.start_time = (unsigned int)time(nullptr);
-      fwrite(&rh, sizeof(rh), 1, fp_);
-      fflush(fp_);
-    }
     std::mt19937 rnd(seed);
     return create_duel(rnd());
   }
 
   void OCG_SetPlayerInfo(intptr_t pduel, int32 playerid, int32 lp, int32 startcount, int32 drawcount) {
-    if (record_ && playerid == 0) {
-      {
-        uint16_t name[20];
-        memset(name, 0, 40);
-        str_to_uint16("Alice", name);
-        fwrite(name, 40, 1, fp_);
-      }
-      {
-        uint16_t name[20];
-        memset(name, 0, 40);
-        str_to_uint16("Bob", name);
-        fwrite(name, 40, 1, fp_);
-      }
-
-      ReplayWriteInt32(lp);
-      ReplayWriteInt32(startcount);
-      ReplayWriteInt32(drawcount);
-      ReplayWriteInt32(duel_options_);
-    }
     set_player_info(pduel, playerid, lp, startcount, drawcount);
   }
 
   void OCG_NewCard(intptr_t pduel, uint32 code, uint8 owner, uint8 playerid, uint8 location, uint8 sequence, uint8 position) {
-    if (record_) {
-      ReplayWriteInt32(code);
-    }
     new_card(pduel, code, owner, playerid, location, sequence, position);
   }
 
@@ -2155,11 +2198,19 @@ private:
       // generate random deck name
       std::uniform_int_distribution<uint64_t> dist_int(0,
                                                        deck_names_.size() - 1);
-      deck = deck_names_[dist_int(gen_)];
+      deck_name_[player] = deck_names_[dist_int(gen_)];
+    } else {
+      deck_name_[player] = deck;
     }
+    deck = deck_name_[player];
 
     main_deck = main_decks_.at(deck);
     extra_deck = extra_decks_.at(deck);
+
+    if (verbose_) {
+      fmt::println("{} {}: {}, main({}), extra({})", player, nickname_[player],
+        deck, main_deck.size(), extra_deck.size());
+    }
 
     if (shuffle) {
       std::shuffle(main_deck.begin(), main_deck.end(), gen_);
@@ -2167,17 +2218,10 @@ private:
 
     // add main deck in reverse order following ygopro
     // but since we have shuffled deck, so just add in order
-    if (record_) {
-      ReplayWriteInt32(main_deck.size());
-    }
 
     for (int i = 0; i < main_deck.size(); i++) {
       OCG_NewCard(pduel_, main_deck[i], player, player, LOCATION_DECK, 0,
                POS_FACEDOWN_DEFENSE);
-    }
-
-    if (record_) {
-      ReplayWriteInt32(extra_deck.size());
     }
 
     // add extra deck in reverse order following ygopro
@@ -2261,7 +2305,7 @@ private:
     int32_t bl = OCG_QueryCard(pduel_, player, loc, seq, flags, query_buf_, 0);
     qdp_ = 0;
     if (bl <= 0) {
-      throw std::runtime_error("Invalid card");
+      throw std::runtime_error("[get_card_code] Invalid card");
     }
     qdp_ += 8;
     return q_read_u32();
@@ -2274,11 +2318,11 @@ private:
     int32_t bl = OCG_QueryCard(pduel_, player, loc, seq, flags, query_buf_, 0);
     qdp_ = 0;
     if (bl <= 0) {
-      throw std::runtime_error("Invalid card");
+      throw std::runtime_error("[get_card] Invalid card (bl <= 0)");
     }
     uint32_t f = q_read_u32();
     if (f == LEN_EMPTY) {
-      throw std::runtime_error("Invalid card");
+      return Card();
     }
     f = q_read_u32();
     CardCode code = q_read_u32();
@@ -2368,7 +2412,12 @@ private:
       // TODO: counters
       uint32_t n_counters = q_read_u32();
       for (int i = 0; i < n_counters; ++i) {
-        q_read_u32();
+        if (i == 0) {
+          c.counter_ = q_read_u32();
+        }
+        else {
+          q_read_u32();
+        }
       }
 
       c.lscale_ = q_read_u32();
@@ -2711,6 +2760,9 @@ private:
       uint8_t type = read_u8();
       uint32_t value = read_u32();
       Card card = get_card(player, loc, seq);
+      if (card.code_ == 0) {
+        return;
+      }
       if (type == CHINT_RACE) {
         std::string races_str = "TODO";
         for (PlayerId pl = 0; pl < 2; pl++) {
@@ -2797,6 +2849,43 @@ private:
           p->notify(fmt::format("{}: {}", i + 1, cards[i].name_));
         }
       }
+    } else if (msg_ == MSG_RANDOM_SELECTED) {
+      if (!verbose_) {
+        dp_ = dl_;
+        return;
+      }
+      auto player = read_u8();
+      auto count = read_u8();
+      std::vector<Card> cards;
+
+      for (int i = 0; i < count; ++i) {
+        auto c = read_u8();
+        auto loc = read_u8();
+        if (loc & LOCATION_OVERLAY) {
+          throw std::runtime_error("Overlay not supported for random selected");
+        }
+        auto seq = read_u8();
+        auto pos = read_u8();
+        cards.push_back(get_card(c, loc, seq));
+      }
+
+      for (PlayerId pl = 0; pl < 2; pl++) {
+        auto p = players_[pl];
+        auto s = "card is";
+        if (count > 1) {
+          s = "cards are";
+        }
+        if (pl == player) {
+          p->notify(fmt::format("Your {} {} randomly selected:", s, count));
+        } else {
+          p->notify(fmt::format("{}'s {} {} randomly selected:",
+                                players_[player]->nickname_, s, count));
+        }
+        for (int i = 0; i < count; ++i) {
+          p->notify(fmt::format("{}: {}", cards[i].get_spec(pl), cards[i].name_));
+        }
+      }
+
     } else if (msg_ == MSG_CONFIRM_CARDS) {
       auto player = read_u8();
       auto size = read_u8();
@@ -2898,6 +2987,47 @@ private:
       //   }
       //   OCG_SetResponseb(pduel_, resp_buf_);
       // };
+    } else if (msg_ == MSG_ADD_COUNTER) {
+      if (!verbose_) {
+        dp_ = dl_;
+        return;
+      }
+      auto ctype = read_u16();
+      auto player = read_u8();
+      auto loc = read_u8();
+      auto seq = read_u8();
+      auto count = read_u16();
+      auto c = get_card(player, loc, seq);
+      auto pl = players_[player];
+      PlayerId op_id = 1 - player;
+      auto op = players_[op_id];
+      // TODO: counter type to string
+      pl->notify(fmt::format("{} counter(s) of type {} placed on {} ().", count, "UNK", c.name_, c.get_spec(player)));
+      op->notify(fmt::format("{} counter(s) of type {} placed on {} ().", count, "UNK", c.name_, c.get_spec(op_id)));
+    } else if (msg_ == MSG_REMOVE_COUNTER) {
+      if (!verbose_) {
+        dp_ = dl_;
+        return;
+      }
+      auto ctype = read_u16();
+      auto player = read_u8();
+      auto loc = read_u8();
+      auto seq = read_u8();
+      auto count = read_u16();
+      auto c = get_card(player, loc, seq);
+      auto pl = players_[player];
+      PlayerId op_id = 1 - player;
+      auto op = players_[op_id];
+      pl->notify(fmt::format("{} counter(s) of type {} removed from {} ().", count, "UNK", c.name_, c.get_spec(player)));
+      op->notify(fmt::format("{} counter(s) of type {} removed from {} ().", count, "UNK", c.name_, c.get_spec(op_id)));
+    } else if (msg_ == MSG_ATTACK_DISABLED) {
+      if (!verbose_) {
+        dp_ = dl_;
+        return;
+      }
+      for (PlayerId pl = 0; pl < 2; pl++) {
+        players_[pl]->notify(get_system_string(1621));
+      }
     } else if (msg_ == MSG_SHUFFLE_SET_CARD) {
       if (!verbose_) {
         dp_ = dl_;
@@ -2915,6 +3045,20 @@ private:
       auto op = players_[1 - player];
       pl->notify("You shuffled your deck.");
       op->notify(pl->nickname_ + " shuffled their deck.");
+    } else if (msg_ == MSG_SHUFFLE_EXTRA) {
+      if (!verbose_) {
+        dp_ = dl_;
+        return;
+      }
+      auto player = read_u8();
+      auto count = read_u8();
+      for (int i = 0; i < count; ++i) {
+        read_u32();
+      }
+      auto pl = players_[player];
+      auto op = players_[1 - player];
+      pl->notify(fmt::format("You shuffled your extra deck ({}).", count));
+      op->notify(fmt::format("{} shuffled their extra deck ({}).", pl->nickname_, count));
     } else if (msg_ == MSG_SHUFFLE_HAND) {
       if (!verbose_) {
         dp_ = dl_;
@@ -3809,9 +3953,21 @@ private:
             throw std::runtime_error("Unknown effectyn desc " +
                                      std::to_string(desc) + " of " + name);
           }
+        }  else if (desc < 10000u) {
+          s = get_system_string(desc);
         } else {
-          throw std::runtime_error("Unknown effectyn desc " +
-                                   std::to_string(desc) + " of " + name);
+          CardCode code = (desc >> 4) & 0x0fffffff;
+          uint32_t offset = desc & 0xf;
+          if (cards_.find(code) != cards_.end()) {
+            auto &card_ = c_get_card(code);
+            s = card_.strings_[offset];
+            if (s.empty()) {
+              s = "???";
+            }
+          } else {
+            throw std::runtime_error("Unknown effectyn desc " +
+                                     std::to_string(desc) + " of " + name);
+          }
         }
         pl->notify(s);
         pl->notify("Please enter y or n.");
@@ -4082,6 +4238,35 @@ private:
         resp_buf_[1] = loc;
         resp_buf_[2] = seq;
         OCG_SetResponseb(pduel_, resp_buf_);
+      };
+    } else if (msg_ == MSG_ANNOUNCE_NUMBER) {
+      auto player = read_u8();
+      to_play_ = player;
+      auto count = read_u8();
+      std::vector<int> numbers;
+      for (int i = 0; i < count; ++i) {
+        int number = read_u32();
+        if (number <= 0 || number > 12) {
+          throw std::runtime_error("Number " + std::to_string(number) +
+                                   " not implemented for announce number");
+        }
+        numbers.push_back(number);
+        options_.push_back(std::string(1, '0' + number));
+      }
+      if (verbose_) {
+        auto pl = players_[player];
+        std::string str = "Select a number, one of: [";
+        for (int i = 0; i < count; ++i) {
+          str += std::to_string(numbers[i]);
+          if (i < count - 1) {
+            str += ", ";
+          }
+        }
+        str += "]";
+        pl->notify(str);
+      }
+      callback_ = [this](int idx) {
+        OCG_SetResponsei(pduel_, idx);
       };
     } else if (msg_ == MSG_ANNOUNCE_ATTRIB) {
       auto player = read_u8();

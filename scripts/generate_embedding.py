@@ -1,6 +1,7 @@
 import os
 import time
 from dataclasses import dataclass
+from typing import Optional
 
 import numpy as np
 
@@ -17,7 +18,7 @@ class Args:
     """the directory of ydk files"""
     code_list_file: str = "code_list.txt"
     """the file containing the list of card codes"""
-    embeddings_file: str = "embeddings.npy"
+    embeddings_file: Optional[str] = "embeddings.npy"
     """the npz file containing the embeddings of the cards"""
     cards_db: str = "../assets/locale/en/cards.cdb"
     """the cards database file"""
@@ -77,15 +78,16 @@ if __name__ == "__main__":
     code_list = [int(code.strip()) for code in code_list]
     print(f"The database contains {len(code_list)} cards.")
 
-    # read embeddings
-    if not os.path.exists(embeddings_file):
-        sample_embedding = get_embeddings(["test"])[0]
-        all_embeddings = np.zeros((0, len(sample_embedding)), dtype=np.float32)
-    else:
-        all_embeddings = np.load(embeddings_file)
-    print("Embedding dim:", all_embeddings.shape[1])
+    if embeddings_file is not None:
+        # read embeddings
+        if not os.path.exists(embeddings_file):
+            sample_embedding = get_embeddings(["test"])[0]
+            all_embeddings = np.zeros((0, len(sample_embedding)), dtype=np.float32)
+        else:
+            all_embeddings = np.load(embeddings_file)
+        print("Embedding dim:", all_embeddings.shape[1])
 
-    assert len(all_embeddings) == len(code_list), f"The number of embeddings({len(all_embeddings)}) does not match the number of cards."
+        assert len(all_embeddings) == len(code_list), f"The number of embeddings({len(all_embeddings)}) does not match the number of cards."
 
     all_codes = set(code_list)
 
@@ -99,17 +101,15 @@ if __name__ == "__main__":
         exit()
 
     new_texts = read_texts(cards_db, new_codes)
-
-    embeddings = get_embeddings(new_texts, args.batch_size, args.wait_time, verbose=True)
-
-    # add new embeddings
-    all_embeddings = np.concatenate([all_embeddings, np.array(embeddings)], axis=0)
+    print(new_texts)
+    if embeddings_file is not None:
+        embeddings = get_embeddings(new_texts, args.batch_size, args.wait_time, verbose=True)
+        all_embeddings = np.concatenate([all_embeddings, np.array(embeddings)], axis=0)
+        np.save(embeddings_file, all_embeddings)
 
     # update code_list
     code_list += new_codes
 
-    # save embeddings and code_list
-    np.save(embeddings_file, all_embeddings)
     with open(code_list_file, "w") as f:
         f.write("\n".join(map(str, code_list)) + "\n")
 

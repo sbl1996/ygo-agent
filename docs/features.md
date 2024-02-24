@@ -10,6 +10,7 @@
 - attribute: 1, int, 0: N/A, same as attribute2str[2:]
 - race: 1, int, 0: N/A, same as race2str
 - level: 1, int, 0: N/A
+- counter: 1, int, 0: N/A
 - atk: 2, max 65535 to 2 bytes
 - def: 2, max 65535 to 2 bytes
 - type: 25, multi-hot, same as type2str

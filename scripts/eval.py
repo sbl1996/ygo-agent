@@ -71,13 +71,13 @@ class Args:
     """the number of layers for the agent"""
     num_channels: int = 128
     """the number of channels for the agent"""
-    checkpoint: str = "checkpoints/agent.pt"
+    checkpoint: Optional[str] = "checkpoints/agent.pt"
     """the checkpoint to load"""
-    embedding_file: Optional[str] = "embeddings_en.npy"
-    """the embedding file for card embeddings"""
 
     compile: bool = False
     """if toggled, the model will be compiled"""
+    optimize: bool = True
+    """if toggled, the model will be optimized"""
     torch_threads: Optional[int] = None
     """the number of threads to use for torch, defaults to ($OMP_NUM_THREADS or 2) * world_size"""
     env_threads: Optional[int] = 16
@@ -137,28 +137,33 @@ if __name__ == "__main__":
     envs = RecordEpisodeStatistics(envs)
 
     if args.agent:
-        if args.embedding_file:
-            embeddings = np.load(args.embedding_file)
-            embedding_shape = embeddings.shape
-        else:
-            embedding_shape = None
+        # count lines of code_list
+        with open(args.code_list_file, "r") as f:
+            code_list = f.readlines()
+            embedding_shape = len(code_list)
         L = args.num_layers
         agent = Agent(args.num_channels, L, L, 1, embedding_shape).to(device)
         agent = agent.eval()
-        state_dict = torch.load(args.checkpoint, map_location=device)
+        if args.checkpoint:
+            state_dict = torch.load(args.checkpoint, map_location=device)
+        else:
+            state_dict = None
 
         if args.compile:
             agent = torch.compile(agent, mode='reduce-overhead')
-            agent.load_state_dict(state_dict)
+            if state_dict:
+                agent.load_state_dict(state_dict)
         else:
             prefix = "_orig_mod."
-            state_dict = {k[len(prefix):] if k.startswith(prefix) else k: v for k, v in state_dict.items()}
-            agent.load_state_dict(state_dict)
-
-            obs = create_obs(envs.observation_space, (num_envs,), device=device)
-            with torch.no_grad():
-                traced_model = torch.jit.trace(agent, (obs,), check_tolerance=False, check_trace=False)
-            agent = torch.jit.optimize_for_inference(traced_model)
+            if state_dict:
+                state_dict = {k[len(prefix):] if k.startswith(prefix) else k: v for k, v in state_dict.items()}
+                agent.load_state_dict(state_dict)
+            
+            if args.optimize:
+                obs = create_obs(envs.observation_space, (num_envs,), device=device)
+                with torch.no_grad():
+                    traced_model = torch.jit.trace(agent, (obs,), check_tolerance=False, check_trace=False)
+                    agent = torch.jit.optimize_for_inference(traced_model)
 
     obs, infos = envs.reset()
 
@@ -220,7 +225,7 @@ if __name__ == "__main__":
                     winner = 0 if episode_reward * pl > 0 else 1
                     win = 1 - winner
                 else:
-                    if episode_reward == -1:
+                    if episode_reward < 0:
                         win = 0
                     else:
                         win = 1
@@ -230,7 +235,6 @@ if __name__ == "__main__":
                 win_rates.append(win)
                 win_reasons.append(1 if win_reason == 1 else 0)
                 sys.stderr.write(f"Episode {len(episode_lengths)}: length={episode_length}, reward={episode_reward}, win={win}, win_reason={win_reason}\n")
-                # print(f"Episode {len(episode_lengths)}: length={episode_length}, reward={episode_reward}")
         if len(episode_lengths) >= args.num_episodes:
             break
 
