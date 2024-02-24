@@ -6,7 +6,6 @@
 
 
 *.out
-code_list.txt
 *.npy
 
 .vscode/
