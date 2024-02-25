@@ -36,7 +36,6 @@ def setup(backend, rank, world_size, port):
 
 
 def mp_start(run):
-    mp.set_start_method('forkserver')
     world_size = int(os.getenv("WORLD_SIZE", "1"))
     if world_size == 1:
         run(local_rank=0, world_size=world_size)

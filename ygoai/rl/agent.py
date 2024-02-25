@@ -29,7 +29,7 @@ class Encoder(nn.Module):
         c = channels
         self.loc_embed = nn.Embedding(9, c)
         self.loc_norm = nn.LayerNorm(c, elementwise_affine=affine)
-        self.seq_embed = nn.Embedding(61, c)
+        self.seq_embed = nn.Embedding(76, c)
         self.seq_norm = nn.LayerNorm(c, elementwise_affine=affine)
 
         linear = lambda in_features, out_features: nn.Linear(in_features, out_features, bias=bias)
@@ -83,7 +83,7 @@ class Encoder(nn.Module):
         self.lp_fc_emb = linear(c_num, c // 4)
         self.oppo_lp_fc_emb = linear(c_num, c // 4)
         self.turn_embed = nn.Embedding(20, c // 8)
-        self.phase_embed = nn.Embedding(10, c // 8)
+        self.phase_embed = nn.Embedding(11, c // 8)
         self.if_first_embed = nn.Embedding(2, c // 8)
         self.is_my_turn_embed = nn.Embedding(2, c // 8)
 
@@ -97,15 +97,15 @@ class Encoder(nn.Module):
 
         divisor = 8
         self.a_msg_embed = nn.Embedding(30, c // divisor)
-        self.a_act_embed = nn.Embedding(11, c // divisor)
+        self.a_act_embed = nn.Embedding(13, c // divisor)
         self.a_yesno_embed = nn.Embedding(3, c // divisor)
         self.a_phase_embed = nn.Embedding(4, c // divisor)
         self.a_cancel_finish_embed = nn.Embedding(3, c // divisor)
         self.a_position_embed = nn.Embedding(9, c // divisor)
-        self.a_option_embed = nn.Embedding(4, c // divisor // 2)
+        self.a_option_embed = nn.Embedding(6, c // divisor // 2)
         self.a_number_embed = nn.Embedding(13, c // divisor // 2)
         self.a_place_embed = nn.Embedding(31, c // divisor // 2)
-        self.a_attrib_embed = nn.Embedding(31, c // divisor // 2)
+        self.a_attrib_embed = nn.Embedding(10, c // divisor // 2)
         self.a_feat_norm = nn.LayerNorm(c, elementwise_affine=affine)
 
         self.a_card_norm = nn.LayerNorm(c, elementwise_affine=False)
