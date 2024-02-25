@@ -105,6 +105,7 @@ class Encoder(nn.Module):
         self.a_option_embed = nn.Embedding(6, c // divisor // 2)
         self.a_number_embed = nn.Embedding(13, c // divisor // 2)
         self.a_place_embed = nn.Embedding(31, c // divisor // 2)
+        # TODO: maybe same embedding as attribute_embed
         self.a_attrib_embed = nn.Embedding(10, c // divisor // 2)
         self.a_feat_norm = nn.LayerNorm(c, elementwise_affine=affine)
 

@@ -43,6 +43,8 @@ class Args:
     """the maximum number of options"""
     n_history_actions: int = 16
     """the number of history actions to use"""
+    num_embeddings: Optional[int] = None
+    """the number of embeddings of the agent"""
 
     player: int = -1
     """the player to play as, -1 means random, 0 is the first player, 1 is the second player"""
@@ -138,9 +140,11 @@ if __name__ == "__main__":
 
     if args.agent:
         # count lines of code_list
-        with open(args.code_list_file, "r") as f:
-            code_list = f.readlines()
-            embedding_shape = len(code_list)
+        embedding_shape = args.num_embeddings
+        if embedding_shape is None:
+            with open(args.code_list_file, "r") as f:
+                code_list = f.readlines()
+                embedding_shape = len(code_list)
         L = args.num_layers
         agent = Agent(args.num_channels, L, L, 1, embedding_shape).to(device)
         agent = agent.eval()

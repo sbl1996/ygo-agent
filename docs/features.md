@@ -18,6 +18,20 @@
 ## Global
 - lp: 2, max 65535 to 2 bytes
 - oppo_lp: 2, max 65535 to 2 bytes
+- n_my_decks: 1, int
+- n_my_extras:
+- n_my_hands:
+- n_my_graves:
+- n_my_removes:
+- n_my_monsters:
+- n_my_spell_traps:
+- n_op_decks:
+- n_op_extras:
+- n_op_hands:
+- n_op_graves:
+- n_op_removes:
+- n_op_monsters:
+- n_op_spell_traps:
 - turn: 1, int, trunc to 8
 - phase: 1, int, one-hot (10)
 - is_first: 1, int, 0: False, 1: True

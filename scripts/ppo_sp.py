@@ -52,7 +52,7 @@ class Args:
     """the maximum number of options"""
     n_history_actions: int = 16
     """the number of history actions to use"""
-    play_mode: str = "self"
+    play_mode: str = "self+bot"
     """the play mode, can be combination of 'self', 'bot', 'random', like 'self+bot'"""
 
     num_layers: int = 2
@@ -289,14 +289,18 @@ def run(local_rank, world_size):
     rewards = torch.zeros((args.num_steps, args.local_num_envs)).to(device)
     dones = torch.zeros((args.num_steps, args.local_num_envs)).to(device)
     values = torch.zeros((args.num_steps, args.local_num_envs)).to(device)
+    to_plays = torch.zeros((args.num_steps, args.local_num_envs)).to(device)
     avg_ep_returns = []
     avg_win_rates = []
+    avg_sp_win_rates = []
 
     # TRY NOT TO MODIFY: start the game
     global_step = 0
     warmup_steps = 0
     start_time = time.time()
-    next_obs = to_tensor(envs.reset()[0], dtype=torch.uint8)
+    next_obs, info = envs.reset()
+    next_obs = to_tensor(next_obs, dtype=torch.uint8)
+    next_to_play = to_tensor(info["to_play"])
     next_done = torch.zeros(args.local_num_envs, device=device)
 
     for iteration in range(1, args.num_iterations + 1):
@@ -315,6 +319,7 @@ def run(local_rank, world_size):
             for key in obs:
                 obs[key][step] = next_obs[key]
             dones[step] = next_done
+            to_plays[step] = next_to_play
 
             _start = time.time()
             logits, value = predict_step(agent, next_obs)
@@ -330,6 +335,7 @@ def run(local_rank, world_size):
 
             _start = time.time()
             next_obs, reward, next_done_, info = envs.step(action)
+            next_to_play = to_tensor(info["to_play"])
             env_time += time.time() - _start
             rewards[step] = to_tensor(reward)
             next_obs, next_done = to_tensor(next_obs, torch.uint8), to_tensor(next_done_)
@@ -341,9 +347,16 @@ def run(local_rank, world_size):
                 if d:
                     episode_length = info['l'][idx]
                     episode_reward = info['r'][idx]
-                    winner = 0 if episode_reward > 0 else 1
                     avg_ep_returns.append(episode_reward)
-                    avg_win_rates.append(1 - winner)
+                    if info['is_selfplay'][idx]:
+                        # win rate for the first player
+                        pl = 1 if to_play[idx] == 0 else -1
+                        winner = 0 if episode_reward * pl > 0 else 1
+                        avg_sp_win_rates.append(1 - winner)
+                    else:
+                        # win rate of agent
+                        winner = 0 if episode_reward > 0 else 1
+                        avg_win_rates.append(1 - winner)
 
                     if random.random() < args.log_p:
                         n = 100
@@ -352,11 +365,15 @@ def run(local_rank, world_size):
                             writer.add_scalar("charts/episodic_length", info["l"][idx], global_step)
                             print(f"global_step={global_step}, e_ret={episode_reward}, e_len={episode_length}")
 
+                        if len(avg_ep_returns) > n:
+                            writer.add_scalar("charts/avg_ep_return", np.mean(avg_ep_returns), global_step)
+                            avg_ep_returns = []
                         if len(avg_win_rates) > n:
                             writer.add_scalar("charts/avg_win_rate", np.mean(avg_win_rates), global_step)
-                            writer.add_scalar("charts/avg_ep_return", np.mean(avg_ep_returns), global_step)
                             avg_win_rates = []
-                            avg_ep_returns = []
+                        if len(avg_sp_win_rates) > n:
+                            writer.add_scalar("charts/avg_sp_win_rate", np.mean(avg_sp_win_rates), global_step)
+                            avg_sp_win_rates = []
 
         collect_time = time.time() - collect_start
 
@@ -365,15 +382,22 @@ def run(local_rank, world_size):
             next_value = agent.get_value(next_obs).reshape(1, -1)
         advantages = torch.zeros_like(rewards).to(device)
         lastgaelam = 0
+        next_to_play_ = next_to_play
         for t in reversed(range(args.num_steps)):
+            to_play = to_plays[t]
             if t == args.num_steps - 1:
                 nextnonterminal = 1.0 - next_done
                 nextvalues = next_value
             else:
                 nextnonterminal = 1.0 - dones[t + 1]
                 nextvalues = values[t + 1]
-            delta = rewards[t] + args.gamma * nextvalues * nextnonterminal - values[t]
-            advantages[t] = lastgaelam = delta + args.gamma * args.gae_lambda * nextnonterminal * lastgaelam
+            sp = 2.0 * (to_play == next_to_play_).float() - 1.0
+            delta = rewards[t] + args.gamma * nextvalues * sp * nextnonterminal - values[t]
+            lastgaelam = delta + args.gamma * args.gae_lambda * nextnonterminal * lastgaelam
+            # TODO: experiment with it
+            # lastgaelam = lastgaelam * sp
+            advantages[t] = lastgaelam
+            next_to_play_ = to_play
         returns = advantages + values
 
         _start = time.time()
