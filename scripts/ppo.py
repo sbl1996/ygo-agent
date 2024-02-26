@@ -317,6 +317,7 @@ def run(local_rank, world_size):
             dones[step] = next_done
 
             _start = time.time()
+            torch._inductor.cudagraph_mark_step_begin()
             logits, value = predict_step(agent, next_obs)
             probs = Categorical(logits=logits)
             action = probs.sample()
@@ -333,6 +334,9 @@ def run(local_rank, world_size):
             env_time += time.time() - _start
             rewards[step] = to_tensor(reward)
             next_obs, next_done = to_tensor(next_obs, torch.uint8), to_tensor(next_done_)
+
+            collect_time = time.time() - collect_start
+            print(f"[Rank {local_rank}] collect_time={collect_time:.4f}, model_time={model_time:.4f}, env_time={env_time:.4f}", flush=True)
 
             if not writer:
                 continue
@@ -358,8 +362,6 @@ def run(local_rank, world_size):
                             avg_win_rates = []
                             avg_ep_returns = []
 
-        collect_time = time.time() - collect_start
-
         # bootstrap value if not done
         with torch.no_grad():
             next_value = agent.get_value(next_obs).reshape(1, -1)
@@ -375,7 +377,7 @@ def run(local_rank, world_size):
             delta = rewards[t] + args.gamma * nextvalues * nextnonterminal - values[t]
             advantages[t] = lastgaelam = delta + args.gamma * args.gae_lambda * nextnonterminal * lastgaelam
         returns = advantages + values
-
+        
         _start = time.time()
         # flatten the batch
         b_obs = {
@@ -399,6 +401,7 @@ def run(local_rank, world_size):
                 mb_obs = {
                     k: v[mb_inds] for k, v in b_obs.items()
                 }
+                torch._inductor.cudagraph_mark_step_begin()
                 old_approx_kl, approx_kl, clipfrac, pg_loss, v_loss, entropy_loss = \
                     train_step(agent, scaler, mb_obs, b_actions[mb_inds], b_logprobs[mb_inds], b_advantages[mb_inds],
                             b_returns[mb_inds], b_values[mb_inds])
@@ -413,8 +416,9 @@ def run(local_rank, world_size):
         
         train_time = time.time() - _start
 
-        if local_rank == 0:
-            print(f"train_time={train_time:.4f}, collect_time={collect_time:.4f}, model_time={model_time:.4f}, env_time={env_time:.4f}")
+        print(f"[Rank {local_rank}] train_time={train_time:.4f}, collect_time={collect_time:.4f}", flush=True)
+        # if local_rank == 0:
+        #     print(f"train_time={train_time:.4f}, collect_time={collect_time:.4f}, model_time={model_time:.4f}, env_time={env_time:.4f}", flush=True)
 
         y_pred, y_true = b_values.cpu().numpy(), b_returns.cpu().numpy()
         var_y = np.var(y_true)
