@@ -4,17 +4,17 @@ import torch.distributed as dist
 import torch.multiprocessing as mp
 
 
-def reduce_gradidents(model, world_size):
+def reduce_gradidents(params, world_size):
     if world_size == 1:
         return
     all_grads_list = []
-    for param in model.parameters():
+    for param in params:
         if param.grad is not None:
             all_grads_list.append(param.grad.view(-1))
     all_grads = torch.cat(all_grads_list)
     dist.all_reduce(all_grads, op=dist.ReduceOp.SUM)
     offset = 0
-    for param in model.parameters():
+    for param in params:
         if param.grad is not None:
             param.grad.data.copy_(
                 all_grads[offset : offset + param.numel()].view_as(param.grad.data) / world_size

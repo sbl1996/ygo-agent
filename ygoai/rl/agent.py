@@ -24,6 +24,7 @@ class Encoder(nn.Module):
     def __init__(self, channels=128, num_card_layers=2, num_action_layers=2,
                  num_history_action_layers=2, embedding_shape=None, bias=False, affine=True):
         super(Encoder, self).__init__()
+        self.channels = channels
         self.num_history_action_layers = num_history_action_layers
 
         c = channels
@@ -318,6 +319,51 @@ class Encoder(nn.Module):
         f_state = torch.cat([f_s_cards_global, f_s_actions_ha], dim=-1)
         return f_actions, f_state, mask, valid
 
+
+class PPOCritic(nn.Module):
+
+    def __init__(self, channels):
+        super(PPOCritic, self).__init__()
+        c = channels
+
+        self.net = nn.Sequential(
+            nn.Linear(c * 2, c // 2),
+            nn.ReLU(),
+            nn.Linear(c // 2, 1),
+        )
+
+    def forward(self, f_state):
+        return self.net(f_state)
+
+
+class PPOActor(nn.Module):
+
+    def __init__(self, channels):
+        super(PPOActor, self).__init__()
+        c = channels
+        self.trans = nn.TransformerEncoderLayer(
+            c, 4, c * 4, dropout=0.0, batch_first=True, norm_first=True, bias=False)
+        self.head = nn.Sequential(
+            nn.Linear(c, c // 4),
+            nn.ReLU(),
+            nn.Linear(c // 4, 1),
+        )
+
+    def forward(self, f_actions, mask, action):
+        f_actions = self.trans(f_actions, src_key_padding_mask=mask)
+        logits = self.head(f_actions)[..., 0]
+        logits = logits.float()
+        logits = logits.masked_fill(mask, float("-inf"))
+
+        probs = Categorical(logits=logits)
+        return probs.log_prob(action), probs.entropy()
+
+    def predict(self, f_actions, mask):
+        f_actions = self.trans(f_actions, src_key_padding_mask=mask)
+        logits = self.head(f_actions)[..., 0]
+        logits = logits.float()
+        logits = logits.masked_fill(mask, float("-inf"))
+        return logits
 
 class PPOAgent(nn.Module):
 

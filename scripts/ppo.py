@@ -95,10 +95,8 @@ class Args:
     backend: Literal["gloo", "nccl", "mpi"] = "nccl"
     """the backend for distributed training"""
 
-    compile: bool = True
-    """whether to use torch.compile to compile the model and functions"""
-    compile_mode: Optional[str] = None
-    """the mode to use for torch.compile"""
+    compile: Optional[str] = None
+    """Compile mode of torch.compile, None for no compilation"""
     torch_threads: Optional[int] = None
     """the number of threads to use for torch, defaults to ($OMP_NUM_THREADS or 2) * world_size"""
     env_threads: Optional[int] = None
