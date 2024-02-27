@@ -147,21 +147,21 @@ if __name__ == "__main__":
                 embedding_shape = len(code_list)
         L = args.num_layers
         agent = Agent(args.num_channels, L, L, 1, embedding_shape).to(device)
-        agent = agent.eval()
+        # agent = agent.eval()
         if args.checkpoint:
             state_dict = torch.load(args.checkpoint, map_location=device)
         else:
             state_dict = None
 
         if args.compile:
-            agent = torch.compile(agent, mode='reduce-overhead')
             if state_dict:
-                agent.load_state_dict(state_dict)
+                print(agent.load_state_dict(state_dict))
+            agent = torch.compile(agent, mode='reduce-overhead')
         else:
             prefix = "_orig_mod."
             if state_dict:
                 state_dict = {k[len(prefix):] if k.startswith(prefix) else k: v for k, v in state_dict.items()}
-                agent.load_state_dict(state_dict)
+                print(agent.load_state_dict(state_dict))
             
             if args.optimize:
                 obs = create_obs(envs.observation_space, (num_envs,), device=device)
@@ -170,6 +170,7 @@ if __name__ == "__main__":
                     agent = torch.jit.optimize_for_inference(traced_model)
 
     obs, infos = envs.reset()
+    next_to_play = infos['to_play']
 
     episode_rewards = []
     episode_lengths = []
@@ -191,7 +192,7 @@ if __name__ == "__main__":
             _start = time.time()
             obs = optree.tree_map(lambda x: torch.from_numpy(x).to(device=device), obs)
             with torch.no_grad():
-                logits, values = agent(obs)
+                logits, values, _valid = agent(obs)
             probs = torch.softmax(logits, dim=-1)
             probs = probs.cpu().numpy()
             if args.play:
@@ -212,9 +213,11 @@ if __name__ == "__main__":
         #     print(k, v.tolist())
         # print(infos)
         # print(actions[0])
+        to_play = next_to_play
 
         _start = time.time()
         obs, rewards, dones, infos = envs.step(actions)
+        next_to_play = infos['to_play']
         env_time += time.time() - _start
 
         step += 1
@@ -225,7 +228,7 @@ if __name__ == "__main__":
                 episode_length = infos['l'][idx]
                 episode_reward = infos['r'][idx]
                 if args.selfplay:
-                    pl = 1 if infos['to_play'][idx] == 0 else -1
+                    pl = 1 if to_play[idx] == 0 else -1
                     winner = 0 if episode_reward * pl > 0 else 1
                     win = 1 - winner
                 else:

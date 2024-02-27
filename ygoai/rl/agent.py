@@ -320,66 +320,88 @@ class Encoder(nn.Module):
         return f_actions, f_state, mask, valid
 
 
-class PPOCritic(nn.Module):
+# class PPOCritic(nn.Module):
 
-    def __init__(self, channels):
-        super(PPOCritic, self).__init__()
+#     def __init__(self, channels):
+#         super(PPOCritic, self).__init__()
+#         c = channels
+
+#         self.net = nn.Sequential(
+#             nn.Linear(c * 2, c // 2),
+#             nn.ReLU(),
+#             nn.Linear(c // 2, 1),
+#         )
+
+#     def forward(self, f_state):
+#         return self.net(f_state)
+
+
+# class PPOActor(nn.Module):
+
+#     def __init__(self, channels):
+#         super(PPOActor, self).__init__()
+#         c = channels
+#         self.trans = nn.TransformerEncoderLayer(
+#             c, 4, c * 4, dropout=0.0, batch_first=True, norm_first=True, bias=False)
+#         self.head = nn.Sequential(
+#             nn.Linear(c, c // 4),
+#             nn.ReLU(),
+#             nn.Linear(c // 4, 1),
+#         )
+
+#     def forward(self, f_actions, mask, action):
+#         f_actions = self.trans(f_actions, src_key_padding_mask=mask)
+#         logits = self.head(f_actions)[..., 0]
+#         logits = logits.float()
+#         logits = logits.masked_fill(mask, float("-inf"))
+
+#         probs = Categorical(logits=logits)
+#         return probs.log_prob(action), probs.entropy()
+
+#     def predict(self, f_actions, mask):
+#         f_actions = self.trans(f_actions, src_key_padding_mask=mask)
+#         logits = self.head(f_actions)[..., 0]
+#         logits = logits.float()
+#         logits = logits.masked_fill(mask, float("-inf"))
+#         return logits
+
+
+class Actor(nn.Module):
+
+    def __init__(self, channels, use_transformer=False):
+        super(Actor, self).__init__()
         c = channels
-
-        self.net = nn.Sequential(
-            nn.Linear(c * 2, c // 2),
-            nn.ReLU(),
-            nn.Linear(c // 2, 1),
-        )
-
-    def forward(self, f_state):
-        return self.net(f_state)
-
-
-class PPOActor(nn.Module):
-
-    def __init__(self, channels):
-        super(PPOActor, self).__init__()
-        c = channels
-        self.trans = nn.TransformerEncoderLayer(
-            c, 4, c * 4, dropout=0.0, batch_first=True, norm_first=True, bias=False)
+        self.use_transformer = use_transformer
+        if use_transformer:
+            self.transformer = nn.TransformerEncoderLayer(
+                c, 4, c * 4, dropout=0.0, batch_first=True, norm_first=True, bias=False)
         self.head = nn.Sequential(
             nn.Linear(c, c // 4),
             nn.ReLU(),
             nn.Linear(c // 4, 1),
         )
 
-    def forward(self, f_actions, mask, action):
-        f_actions = self.trans(f_actions, src_key_padding_mask=mask)
-        logits = self.head(f_actions)[..., 0]
-        logits = logits.float()
-        logits = logits.masked_fill(mask, float("-inf"))
-
-        probs = Categorical(logits=logits)
-        return probs.log_prob(action), probs.entropy()
-
-    def predict(self, f_actions, mask):
-        f_actions = self.trans(f_actions, src_key_padding_mask=mask)
+    def forward(self, f_actions, mask):
+        if self.use_transformer:
+            f_actions = self.transformer(f_actions, src_key_padding_mask=mask)
         logits = self.head(f_actions)[..., 0]
         logits = logits.float()
         logits = logits.masked_fill(mask, float("-inf"))
         return logits
 
+
 class PPOAgent(nn.Module):
 
     def __init__(self, channels=128, num_card_layers=2, num_action_layers=2,
-                 num_history_action_layers=2, embedding_shape=None, bias=False, affine=True):
+                 num_history_action_layers=2, embedding_shape=None, bias=False,
+                 affine=True, a_trans=True):
         super(PPOAgent, self).__init__()
 
         self.encoder = Encoder(
             channels, num_card_layers, num_action_layers, num_history_action_layers, embedding_shape, bias, affine)
 
         c = channels
-        self.actor = nn.Sequential(
-            nn.Linear(c, c // 4),
-            nn.ReLU(),
-            nn.Linear(c // 4, 1),
-        )
+        self.actor = Actor(c, a_trans)
 
         self.critic = nn.Sequential(
             nn.Linear(c * 2, c // 2),
@@ -390,24 +412,15 @@ class PPOAgent(nn.Module):
     def load_embeddings(self, embeddings, freeze=True):
         self.encoder.load_embeddings(embeddings, freeze)
 
+    def get_logit(self, x):
+        f_actions, f_state, mask, valid = self.encoder(x)
+        return self.actor(f_actions, mask)
+
     def get_value(self, x):
         f_actions, f_state, mask, valid = self.encoder(x)
         return self.critic(f_state)
 
-    def get_action_and_value(self, x, action):
-        f_actions, f_state, mask, valid = self.encoder(x)
-
-        logits = self.actor(f_actions)[..., 0]
-        logits = logits.float()
-        logits = logits.masked_fill(mask, float("-inf"))
-
-        probs = Categorical(logits=logits)
-        return action, probs.log_prob(action), probs.entropy(), self.critic(f_state), valid
-
     def forward(self, x):
         f_actions, f_state, mask, valid = self.encoder(x)
-
-        logits = self.actor(f_actions)[..., 0]
-        logits = logits.float()
-        logits = logits.masked_fill(mask, float("-inf"))
-        return logits, self.critic(f_state)
+        logits = self.actor(f_actions, mask)
+        return logits, self.critic(f_state), valid

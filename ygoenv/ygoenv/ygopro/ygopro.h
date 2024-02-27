@@ -2935,7 +2935,6 @@ private:
         return;
       }
       auto player = read_u8();
-      to_play_ = player;
       auto size = read_u8();
       std::vector<Card> cards;
       for (int i = 0; i < size; ++i) {
@@ -3315,7 +3314,6 @@ private:
       throw std::runtime_error("Retry");
     } else if (msg_ == MSG_SELECT_BATTLECMD) {
       auto player = read_u8();
-      to_play_ = player;
       auto activatable = read_cardlist_spec(true);
       auto attackable = read_cardlist_spec(true, true);
       bool to_m2 = read_u8();
@@ -3366,6 +3364,7 @@ private:
       }
       int n_activatables = activatable.size();
       int n_attackables = attackable.size();
+      to_play_ = player;
       callback_ = [this, n_activatables, n_attackables, to_ep, to_m2](int idx) {
         if (idx < n_activatables) {
           OCG_SetResponsei(pduel_, idx << 16);
@@ -3382,7 +3381,6 @@ private:
       };
     } else if (msg_ == MSG_SELECT_UNSELECT_CARD) {
       auto player = read_u8();
-      to_play_ = player;
       bool finishable = read_u8();
       bool cancelable = read_u8();
       auto min = read_u8();
@@ -3435,6 +3433,7 @@ private:
 
       // cancelable and finishable not needed
 
+      to_play_ = player;
       callback_ = [this](int idx) {
         if (options_[idx] == "f") {
           OCG_SetResponsei(pduel_, -1);
@@ -3447,7 +3446,6 @@ private:
 
     } else if (msg_ == MSG_SELECT_CARD) {
       auto player = read_u8();
-      to_play_ = player;
       bool cancelable = read_u8();
       auto min = read_u8();
       auto max = read_u8();
@@ -3535,6 +3533,7 @@ private:
         }
       }
 
+      to_play_ = player;
       callback_ = [this, combs](int idx) {
         const auto &comb = combs[idx];
         resp_buf_[0] = comb.size();
@@ -3545,7 +3544,6 @@ private:
       };
     } else if (msg_ == MSG_SELECT_TRIBUTE) {
       auto player = read_u8();
-      to_play_ = player;
       bool cancelable = read_u8();
       auto min = read_u8();
       auto max = read_u8();
@@ -3621,6 +3619,7 @@ private:
         options_.push_back(option);
       }
 
+      to_play_ = player;
       callback_ = [this, combs](int idx) {
         const auto &comb = combs[idx];
         resp_buf_[0] = comb.size();
@@ -3632,7 +3631,6 @@ private:
     } else if (msg_ == MSG_SELECT_SUM) {
       auto mode = read_u8();
       auto player = read_u8();
-      to_play_ = player;
       auto val = read_u32();
       auto min = read_u8();
       auto max = read_u8();
@@ -3761,6 +3759,7 @@ private:
         options_.push_back(option);
       }
 
+      to_play_ = player;
       callback_ = [this, combs, must_select_size](int idx) {
         const auto &comb = combs[idx];
         resp_buf_[0] = must_select_size + comb.size();
@@ -3775,7 +3774,6 @@ private:
 
     } else if (msg_ == MSG_SELECT_CHAIN) {
       auto player = read_u8();
-      to_play_ = player;
       auto size = read_u8();
       auto spe_count = read_u8();
       bool forced = read_u8();
@@ -3872,6 +3870,7 @@ private:
       if (!forced) {
         options_.push_back("c");
       }
+      to_play_ = player;
       callback_ = [this, forced](int idx) {
         const auto &option = options_[idx];
         if ((option == "c") && (!forced)) {
@@ -3882,7 +3881,6 @@ private:
       };
     } else if (msg_ == MSG_SELECT_YESNO) {
       auto player = read_u8();
-      to_play_ = player;
 
       if (verbose_) {
         auto desc = read_u32();
@@ -3907,6 +3905,7 @@ private:
         dp_ += 4;
       }
       options_ = {"y", "n"};
+      to_play_ = player;
       callback_ = [this](int idx) {
         if (idx == 0) {
           OCG_SetResponsei(pduel_, 1);
@@ -3918,7 +3917,6 @@ private:
       };
     } else if (msg_ == MSG_SELECT_EFFECTYN) {
       auto player = read_u8();
-      to_play_ = player;
 
       std::string spec;
       if (verbose_) {
@@ -3981,6 +3979,7 @@ private:
         spec = ls_to_spec(loc, seq, pos, c != player);
       }
       options_ = {"y " + spec, "n " + spec};
+      to_play_ = player;
       callback_ = [this](int idx) {
         if (idx == 0) {
           OCG_SetResponsei(pduel_, 1);
@@ -3992,7 +3991,6 @@ private:
       };
     } else if (msg_ == MSG_SELECT_OPTION) {
       auto player = read_u8();
-      to_play_ = player;
       auto size = read_u8();
       if (verbose_) {
         auto pl = players_[player];
@@ -4016,6 +4014,7 @@ private:
           options_.push_back(std::to_string(i + 1));
         }
       }
+      to_play_ = player;
       callback_ = [this](int idx) {
         if (verbose_) {
           players_[to_play_]->notify("You selected option " + options_[idx] +
@@ -4029,7 +4028,6 @@ private:
       };
     } else if (msg_ == MSG_SELECT_IDLECMD) {
       int32_t player = read_u8();
-      to_play_ = player;
       auto summonable_ = read_cardlist_spec();
       auto spsummon_ = read_cardlist_spec();
       auto repos_ = read_cardlist_spec();
@@ -4134,6 +4132,7 @@ private:
         }
       }
 
+      to_play_ = player;
       callback_ = [this, spsummon_offset, repos_offset, mset_offset, set_offset,
                    activate_offset](int idx) {
         const auto &option = options_[idx];
@@ -4169,7 +4168,6 @@ private:
       };
     } else if (msg_ == MSG_SELECT_PLACE) {
       auto player = read_u8();
-      to_play_ = player;
       auto count = read_u8();
       if (count == 0) {
         count = 1;
@@ -4189,6 +4187,7 @@ private:
                                    " places for card, from " + specs_str + ".");
         }
       }
+      to_play_ = player;
       callback_ = [this, player](int idx) {
         int y = player + 1;
         std::string spec = options_[idx];
@@ -4205,7 +4204,6 @@ private:
       };
     } else if (msg_ == MSG_SELECT_DISFIELD) {
       auto player = read_u8();
-      to_play_ = player;
       auto count = read_u8();
       if (count == 0) {
         count = 1;
@@ -4225,6 +4223,7 @@ private:
                                    std::to_string(count) + " not implemented");
         }
       }
+      to_play_ = player;
       callback_ = [this, player](int idx) {
         int y = player + 1;
         std::string spec = options_[idx];
@@ -4241,7 +4240,6 @@ private:
       };
     } else if (msg_ == MSG_ANNOUNCE_NUMBER) {
       auto player = read_u8();
-      to_play_ = player;
       auto count = read_u8();
       std::vector<int> numbers;
       for (int i = 0; i < count; ++i) {
@@ -4265,12 +4263,12 @@ private:
         str += "]";
         pl->notify(str);
       }
+      to_play_ = player;
       callback_ = [this](int idx) {
         OCG_SetResponsei(pduel_, idx);
       };
     } else if (msg_ == MSG_ANNOUNCE_ATTRIB) {
       auto player = read_u8();
-      to_play_ = player;
       auto count = read_u8();
       auto flag = read_u32();
 
@@ -4310,6 +4308,7 @@ private:
         options_.push_back(option);
       }
 
+      to_play_ = player;
       callback_ = [this](int idx) {
         const auto &option = options_[idx];
         uint32_t resp = 0;
@@ -4323,7 +4322,6 @@ private:
 
     } else if (msg_ == MSG_SELECT_POSITION) {
       auto player = read_u8();
-      to_play_ = player;
       auto code = read_u32();
       auto valid_pos = read_u8();
 
@@ -4348,6 +4346,7 @@ private:
         i++;
       }
 
+      to_play_ = player;
       callback_ = [this](int idx) {
         uint8_t pos = options_[idx][0] - '1';
         OCG_SetResponsei(pduel_, 1 << pos);
