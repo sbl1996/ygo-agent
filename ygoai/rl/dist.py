@@ -1,4 +1,6 @@
 import os
+import sys
+import datetime
 import torch
 import torch.distributed as dist
 import torch.multiprocessing as mp
@@ -25,7 +27,9 @@ def reduce_gradidents(params, world_size):
 def setup(backend, rank, world_size, port):
     os.environ['MASTER_ADDR'] = '127.0.0.1'
     os.environ['MASTER_PORT'] = str(port)
-    dist.init_process_group(backend, rank=rank, world_size=world_size)
+    dist.init_process_group(
+        backend, rank=rank, world_size=world_size,
+        timeout=datetime.timedelta(seconds=60 * 30))
 
     # manual init nccl
     x = torch.rand(4, device=f'cuda:{rank}')
@@ -49,3 +53,9 @@ def mp_start(run):
 
         for i in range(world_size):
             children[i].join()
+
+
+def fprint(msg):
+    sys.stdout.flush()
+    sys.stdout.write(msg + os.linesep)
+    sys.stdout.flush()

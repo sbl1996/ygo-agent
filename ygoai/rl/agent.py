@@ -374,7 +374,7 @@ class Actor(nn.Module):
         self.use_transformer = use_transformer
         if use_transformer:
             self.transformer = nn.TransformerEncoderLayer(
-                c, 4, c * 4, dropout=0.0, batch_first=True, norm_first=True, bias=False)
+                c, 4, c * 4, dropout=0.0, batch_first=True, norm_first=True, bias=True)
         self.head = nn.Sequential(
             nn.Linear(c, c // 4),
             nn.ReLU(),

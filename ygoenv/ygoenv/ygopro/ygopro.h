@@ -81,8 +81,8 @@ combinations_with_weight(const std::vector<int> &weights, int r) {
   return results;
 }
 
-inline bool sum_to2(const std::vector<std::vector<uint32_t>> &w,
-                    const std::vector<int> ind, int i, uint32_t r) {
+inline bool sum_to2(const std::vector<std::vector<int>> &w,
+                    const std::vector<int> ind, int i, int r) {
   if (r <= 0) {
     return false;
   }
@@ -103,14 +103,14 @@ inline bool sum_to2(const std::vector<std::vector<uint32_t>> &w,
   }
 }
 
-inline bool sum_to2(const std::vector<std::vector<uint32_t>> &w,
-                    const std::vector<int> ind, uint32_t r) {
+inline bool sum_to2(const std::vector<std::vector<int>> &w,
+                    const std::vector<int> ind, int r) {
   return sum_to2(w, ind, 0, r);
 }
 
 inline std::vector<std::vector<int>>
-combinations_with_weight2(const std::vector<std::vector<uint32_t>> &weights,
-                          uint32_t r) {
+combinations_with_weight2(const std::vector<std::vector<int>> &weights,
+                          int r) {
   int n = weights.size();
   std::vector<std::vector<int>> results;
 
@@ -492,7 +492,7 @@ ankerl::unordered_dense::map<K, uint8_t>
 make_ids(const std::map<K, std::string> &m, int id_offset = 0,
          int m_offset = 0) {
   ankerl::unordered_dense::map<K, uint8_t> m2;
-  auto i = 0;
+  int i = 0;
   for (const auto &[k, v] : m) {
     if (i < m_offset) {
       i++;
@@ -548,6 +548,14 @@ static const std::map<uint8_t, std::string> location2str = {
 
 static const ankerl::unordered_dense::map<uint8_t, uint8_t> location2id =
     make_ids(location2str, 1);
+
+inline uint8_t location_to_id(uint8_t location) {
+  auto it = location2id.find(location);
+  if (it != location2id.end()) {
+    return it->second;
+  }
+  return 0;
+}
 
 #define POS_NONE 0x0 // xyz materials (overlay)
 
@@ -1538,8 +1546,8 @@ public:
           ReplayWriteInt32(code);
         }
         ReplayWriteInt32(extra_deck.size());
-        for (int i = extra_deck.size() - 1; i >= 0; --i) {
-          ReplayWriteInt32(extra_deck[i]);
+        for (int j = int(extra_deck.size()) - 1; j >= 0; --j) {
+          ReplayWriteInt32(extra_deck[j]);
         }
       }
 
@@ -1813,7 +1821,21 @@ private:
                             const std::string &spec,
                             const SpecIndex &spec2index,
                             const std::vector<CardId> &card_ids) {
-    uint16_t idx = spec2index.empty() ? card_ids[j] : spec2index.at(spec);
+    uint16_t idx;
+    if (spec2index.empty()) {
+      idx = card_ids[j];
+    } else {
+      auto it = spec2index.find(spec);
+      if (it == spec2index.end()) {
+        // print spec2index
+        fmt::println("Spec2index:");
+        for (auto &[k, v] : spec2index) {
+          fmt::println("{}: {}", k, v);
+        }
+        throw std::runtime_error("Spec not found: " + spec);
+      }
+      idx = it->second;
+    }
     feat(i, 2 * j) = static_cast<uint8_t>(idx >> 8);
     feat(i, 2 * j + 1) = static_cast<uint8_t>(idx & 0xff);
   }
@@ -1877,7 +1899,7 @@ private:
         auto act = option[0];
         auto spec = option.substr(2);
         uint8_t offset = 0;
-        auto n = spec.size();
+        int n = spec.size();
         if (act == 'v' && std::isalpha(spec[n - 1])) {
           offset = spec[n - 1] - 'a';
           spec = spec.substr(0, n - 1);
@@ -2225,7 +2247,7 @@ private:
     }
 
     // add extra deck in reverse order following ygopro
-    for (int i = extra_deck.size() - 1; i >= 0; --i) {
+    for (int i = int(extra_deck.size()) - 1; i >= 0; --i) {
       OCG_NewCard(pduel_, extra_deck[i], player, player, LOCATION_EXTRA, 0,
                POS_FACEDOWN_DEFENSE);
     }
@@ -2697,7 +2719,6 @@ private:
       auto c = card.controler_;
       auto cpl = players_[c];
       auto opl = players_[1 - c];
-      auto x = 1u - c;
       cpl->notify(fmt::format("You set {} ({}) in {} position.", card.name_,
                               card.get_spec(c), card.get_position()));
       opl->notify(fmt::format("{} sets {} in {} position.", cpl->nickname_,
@@ -3612,7 +3633,7 @@ private:
         std::string option = "";
         for (int j = 0; j < min; ++j) {
           option += specs[comb[j]];
-          if (j < min - 1) {
+          if (j < int(min) - 1) {
             option += " ";
           }
         }
@@ -3632,8 +3653,8 @@ private:
       auto mode = read_u8();
       auto player = read_u8();
       auto val = read_u32();
-      auto min = read_u8();
-      auto max = read_u8();
+      int min = read_u8();
+      int max = read_u8();
       auto must_select_size = read_u8();
 
       if (mode == 0) {
@@ -3655,7 +3676,7 @@ private:
       must_select_params.reserve(must_select_size);
       must_select_specs.reserve(must_select_size);
 
-      uint32_t expected;
+      int expected;
       if (verbose_) {
         std::vector<Card> must_select;
         must_select.reserve(must_select_size);
@@ -3669,7 +3690,7 @@ private:
           must_select.push_back(card);
           must_select_params.push_back(param);
         }
-        expected = val - (must_select_params[0] & 0xff);
+        expected = int(val) - (must_select_params[0] & 0xff);
         auto pl = players_[player];
         pl->notify("Select cards with a total value of " +
                    std::to_string(expected) + ", seperated by spaces.");
@@ -3691,7 +3712,7 @@ private:
           must_select_specs.push_back(spec);
           must_select_params.push_back(param);
         }
-        expected = val - (must_select_params[0] & 0xff);
+        expected = int(val) - (must_select_params[0] & 0xff);
       }
 
       uint8_t select_size = read_u8();
@@ -3731,11 +3752,11 @@ private:
         }
       }
 
-      std::vector<std::vector<uint32_t>> card_levels;
+      std::vector<std::vector<int>> card_levels;
       for (int i = 0; i < select_size; ++i) {
-        std::vector<uint32_t> levels;
-        uint32_t level1 = select_params[i] & 0xff;
-        uint32_t level2 = (select_params[i] >> 16);
+        std::vector<int> levels;
+        int level1 = select_params[i] & 0xff;
+        int level2 = (select_params[i] >> 16);
         if (level1 > 0) {
           levels.push_back(level1);
         }
@@ -4240,7 +4261,7 @@ private:
       };
     } else if (msg_ == MSG_ANNOUNCE_NUMBER) {
       auto player = read_u8();
-      auto count = read_u8();
+      int count = read_u8();
       std::vector<int> numbers;
       for (int i = 0; i < count; ++i) {
         int number = read_u32();
@@ -4269,7 +4290,7 @@ private:
       };
     } else if (msg_ == MSG_ANNOUNCE_ATTRIB) {
       auto player = read_u8();
-      auto count = read_u8();
+      int count = read_u8();
       auto flag = read_u32();
 
       int n_attrs = 7;

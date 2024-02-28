@@ -195,9 +195,9 @@ if __name__ == "__main__":
                 logits, values, _valid = agent(obs)
             probs = torch.softmax(logits, dim=-1)
             probs = probs.cpu().numpy()
-            if args.play:
-                print(probs[probs != 0].tolist())
-                print(values)
+            if args.verbose:
+                print([f"{p:.4f}" for p in probs[probs != 0].tolist()])
+                print(f"{values[0].item():.4f}")
             actions = probs.argmax(axis=1)
             model_time += time.time() - _start
         else:
