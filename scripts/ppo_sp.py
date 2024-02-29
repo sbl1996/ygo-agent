@@ -39,7 +39,7 @@ class Args:
     # Algorithm specific arguments
     env_id: str = "YGOPro-v0"
     """the id of the environment"""
-    deck: str = "../assets/deck/OldSchool.ydk"
+    deck: str = "../assets/deck"
     """the deck file to use"""
     deck1: Optional[str] = None
     """the deck file for the first player"""
@@ -47,19 +47,21 @@ class Args:
     """the deck file for the second player"""
     code_list_file: str = "code_list.txt"
     """the code list file for card embeddings"""
-    embedding_file: Optional[str] = "embeddings_en.npy"
+    embedding_file: Optional[str] = None
     """the embedding file for card embeddings"""
     max_options: int = 24
     """the maximum number of options"""
     n_history_actions: int = 16
     """the number of history actions to use"""
     play_mode: str = "bot"
-    """the play mode, can be combination of 'self', 'bot', 'random', like 'self+bot'"""
+    """the play mode, can be combination of 'bot' (greedy), 'random', like 'bot+random'"""
 
     num_layers: int = 2
     """the number of layers for the agent"""
     num_channels: int = 128
     """the number of channels for the agent"""
+    checkpoint: Optional[str] = None
+    """the checkpoint to load the model from"""
 
     total_timesteps: int = 1000000000
     """total timesteps of the experiments"""
@@ -236,8 +238,15 @@ def run(local_rank, world_size):
         embedding_shape = None
     L = args.num_layers
     agent = Agent(args.num_channels, L, L, 1, embedding_shape).to(device)
-    if args.embedding_file:
+
+    if args.checkpoint:
+        agent.load_state_dict(torch.load(args.checkpoint, map_location=device))
+        fprint(f"Loaded checkpoint from {args.checkpoint}")
+    elif args.embedding_file:
         agent.load_embeddings(embeddings)
+        fprint(f"Loaded embeddings from {args.embedding_file}")
+    if args.embedding_file:
+        agent.freeze_embeddings()
 
     optim_params = list(agent.parameters())
     optimizer = optim.Adam(optim_params, lr=args.learning_rate, eps=1e-5)
@@ -431,12 +440,10 @@ def run(local_rank, world_size):
         nextvalues1 = torch.where(next_to_play == ai_player1, value, next_value1)
         nextvalues2 = torch.where(next_to_play != ai_player1, value, next_value2)
         # TODO: optimize this
-        done_used1 = torch.zeros_like(next_done, dtype=torch.bool)
-        done_used2 = torch.zeros_like(next_done, dtype=torch.bool)
-        reward1 = 0
-        reward2 = 0
-        lastgaelam1 = 0
-        lastgaelam2 = 0
+        done_used1 = torch.ones_like(next_done, dtype=torch.bool)
+        done_used2 = torch.ones_like(next_done, dtype=torch.bool)
+        reward1 = reward2 = 0
+        lastgaelam1 = lastgaelam2 = 0
         for t in reversed(range(args.num_steps)):
             # if learns[t]:
             #     if dones[t+1]:
@@ -586,6 +593,7 @@ def run(local_rank, world_size):
                 writer.add_scalar("charts/SPS", SPS, global_step)
 
         if iteration % args.eval_interval == 0:
+            # Eval with rule-based policy
             _start = time.time()
             episode_lengths = []
             episode_rewards = []
@@ -626,6 +634,8 @@ def run(local_rank, world_size):
                 writer.add_scalar("charts/eval_win_rate", eval_win_rate, global_step)
                 eval_time = time.time() - _start
                 fprint(f"eval_time={eval_time:.4f}, eval_ep_return={eval_return:.4f}, eval_ep_len={eval_ep_len:.1f}, eval_win_rate={eval_win_rate:.4f}")
+
+            # Eval with old model
 
     if args.world_size > 1:
         dist.destroy_process_group()

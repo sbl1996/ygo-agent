@@ -1827,14 +1827,17 @@ private:
     } else {
       auto it = spec2index.find(spec);
       if (it == spec2index.end()) {
+        // TODO: find the root cause
         // print spec2index
         fmt::println("Spec2index:");
         for (auto &[k, v] : spec2index) {
           fmt::println("{}: {}", k, v);
         }
-        throw std::runtime_error("Spec not found: " + spec);
+        // throw std::runtime_error("Spec not found: " + spec);
+        idx = 1;
+      } else {
+        idx = it->second;
       }
-      idx = it->second;
     }
     feat(i, 2 * j) = static_cast<uint8_t>(idx >> 8);
     feat(i, 2 * j + 1) = static_cast<uint8_t>(idx & 0xff);

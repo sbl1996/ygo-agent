@@ -150,14 +150,15 @@ class Encoder(nn.Module):
             elif "fc_emb" in n:
                 nn.init.uniform_(m.weight, -scale, scale)
 
-    def load_embeddings(self, embeddings, freeze=True):
+    def load_embeddings(self, embeddings):
         weight = self.id_embed.weight
         embeddings = torch.from_numpy(embeddings).to(dtype=weight.dtype, device=weight.device)
         unknown_embed = embeddings.mean(dim=0, keepdim=True)
         embeddings = torch.cat([unknown_embed, embeddings], dim=0)
         weight.data.copy_(embeddings)
-        if freeze:
-            weight.requires_grad = False
+
+    def freeze_embeddings(self):
+        self.id_embed.weight.requires_grad = False
 
     def num_transform(self, x):
         return self.num_fc(bytes_to_bin(x, self.bin_points, self.bin_intervals))
@@ -409,8 +410,11 @@ class PPOAgent(nn.Module):
             nn.Linear(c // 2, 1),
         )
 
-    def load_embeddings(self, embeddings, freeze=True):
-        self.encoder.load_embeddings(embeddings, freeze)
+    def load_embeddings(self, embeddings):
+        self.encoder.load_embeddings(embeddings)
+    
+    def freeze_embeddings(self):
+        self.encoder.freeze_embeddings()
 
     def get_logit(self, x):
         f_actions, f_state, mask, valid = self.encoder(x)

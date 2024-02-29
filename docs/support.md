@@ -15,7 +15,7 @@ Not supported
 - `min` > 5 throws an error
 - `max` > 5 is truncated to 5
 
-### Unsupported
+### related cards
 - Fairy Tail - Snow (min=max=7)
 - Pot of Prosperity (min=max=6)
 

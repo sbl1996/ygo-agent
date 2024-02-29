@@ -8,19 +8,6 @@ add_requires(
     "sqlitecpp 3.2.1")
 
 
--- target("dummy_ygopro")
---     add_rules("python.library")
---     add_files("ygoenv/ygoenv/dummy/*.cpp")
---     add_packages("pybind11", "fmt", "glog", "concurrentqueue")
---     set_languages("c++17")
---     add_includedirs("ygoenv")
---     after_build(function (target)
---         local install_target = "$(projectdir)/ygoenv/ygoenv/dummy"
---         os.cp(target:targetfile(), install_target)
---         print("Copy target to " .. install_target)
---     end)
-
-
 target("ygopro_ygoenv")
     add_rules("python.library")
     add_files("ygoenv/ygoenv/ygopro/*.cpp")
@@ -36,4 +23,23 @@ target("ygopro_ygoenv")
         local install_target = "$(projectdir)/ygoenv/ygoenv/ygopro"
         os.cp(target:targetfile(), install_target)
         print("Copy target to " .. install_target)
+    end)
+
+
+target("alphazero_mcts")
+    add_rules("python.library")
+    add_files("mcts/mcts/alphazero/*.cpp")
+    add_packages("pybind11")
+    set_languages("c++17")
+    if is_mode("release") then
+        set_policy("build.optimization.lto", true)
+        add_cxxflags("-march=native")
+    end
+    add_includedirs("mcts")
+
+    after_build(function (target)
+        local install_target = "$(projectdir)/mcts/mcts/alphazero"
+        os.cp(target:targetfile(), install_target)
+        print("Copy target to " .. install_target)
+        os.run("pybind11-stubgen mcts.alphazero.alphazero_mcts -o %s", "$(projectdir)/mcts")
     end)
