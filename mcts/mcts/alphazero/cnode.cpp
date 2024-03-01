@@ -531,8 +531,11 @@ namespace tree
         float max_score = FLOAT_MIN;
         const float epsilon = 0.000001;
         std::vector<Action> max_index_lst;
+        int action = 0;
         for (const auto &[a, child] : root->children)
         {
+            action = a;
+
             float temp_score = ucb_score(child, min_max_stats, mean_q, root->visit_count, pb_c_base, pb_c_init, discount_factor);
             if (max_score < temp_score)
             {
@@ -547,7 +550,6 @@ namespace tree
             }
         }
 
-        int action = 0;
         if (max_index_lst.size() > 0)
         {
             std::uniform_int_distribution<int> dist(0, max_index_lst.size() - 1);
