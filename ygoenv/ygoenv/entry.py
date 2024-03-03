@@ -20,6 +20,12 @@ except ImportError:
 
 
 try:
+  import ygoenv.edopro.registration  # noqa: F401
+except ImportError:
+  pass
+
+
+try:
   import ygoenv.dummy.registration  # noqa: F401
 except ImportError:
   pass

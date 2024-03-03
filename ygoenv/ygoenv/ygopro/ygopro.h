@@ -1460,7 +1460,7 @@ public:
     auto duel_seed = dist_int_(gen_);
 
     std::unique_lock<std::shared_timed_mutex> ulock(duel_mtx);
-    pduel_ = OCG_CreateDuel(duel_seed);
+    YGO_CreateDuel(duel_seed);
     ulock.unlock();
 
     int init_lp = 8000;
@@ -1483,7 +1483,7 @@ public:
       } else {
         players_[i] = new GreedyAI(nickname_[i], init_lp, i, verbose_);
       }
-      OCG_SetPlayerInfo(pduel_, i, init_lp, startcount, drawcount);
+      YGO_SetPlayerInfo(pduel_, i, init_lp, startcount, drawcount);
       load_deck(i);
       lp_[i] = players_[i]->init_lp_;
     }
@@ -1553,7 +1553,7 @@ public:
 
     }
 
-    OCG_StartDuel(pduel_, duel_options_);
+    YGO_StartDuel(pduel_, duel_options_);
     duel_started_ = true;
     winner_ = 255;
     win_reason_ = 255;
@@ -1719,7 +1719,7 @@ private:
           hidden_for_opponent = false;
         }
         if (opponent && hidden_for_opponent) {
-          auto n_cards = OCG_QueryFieldCount(pduel_, player, location);
+          auto n_cards = YGO_QueryFieldCount(pduel_, player, location);
           for (auto i = 0; i < n_cards; i++) {
             f_cards(offset, 2) = location2id.at(location);
             f_cards(offset, 4) = 1;
@@ -2067,48 +2067,48 @@ private:
   }
 
   // ygopro-core API
-  intptr_t OCG_CreateDuel(uint32_t seed) {
+  void YGO_CreateDuel(uint32_t seed) {
     std::mt19937 rnd(seed);
-    return create_duel(rnd());
+    pduel_ =  create_duel(rnd());
   }
 
-  void OCG_SetPlayerInfo(intptr_t pduel, int32 playerid, int32 lp, int32 startcount, int32 drawcount) {
+  void YGO_SetPlayerInfo(intptr_t pduel, int32 playerid, int32 lp, int32 startcount, int32 drawcount) {
     set_player_info(pduel, playerid, lp, startcount, drawcount);
   }
 
-  void OCG_NewCard(intptr_t pduel, uint32 code, uint8 owner, uint8 playerid, uint8 location, uint8 sequence, uint8 position) {
+  void YGO_NewCard(intptr_t pduel, uint32 code, uint8 owner, uint8 playerid, uint8 location, uint8 sequence, uint8 position) {
     new_card(pduel, code, owner, playerid, location, sequence, position);
   }
 
-  void OCG_StartDuel(intptr_t pduel, int32 options) {
+  void YGO_StartDuel(intptr_t pduel, int32 options) {
     start_duel(pduel, options);
   }
 
-  void OCG_EndDuel(intptr_t pduel) {
+  void YGO_EndDuel(intptr_t pduel) {
     end_duel(pduel);
   }
 
-  int32 OCG_GetMessage(intptr_t pduel, byte* buf) {
+  int32 YGO_GetMessage(intptr_t pduel, byte* buf) {
     return get_message(pduel, buf);
   }
 
-  uint32 OCG_Process(intptr_t pduel) {
+  uint32 YGO_Process(intptr_t pduel) {
     return process(pduel);
   }
 
-  int32 OCG_QueryCard(intptr_t pduel, uint8 playerid, uint8 location, uint8 sequence, int32 query_flag, byte* buf, int32 use_cache) {
-    return query_card(pduel, playerid, location, sequence, query_flag, buf, use_cache);
+  int32 YGO_QueryCard(intptr_t pduel, uint8 playerid, uint8 location, uint8 sequence, int32 query_flag, byte* buf) {
+    return query_card(pduel, playerid, location, sequence, query_flag, buf, 0);
   }
 
-  int32 OCG_QueryFieldCount(intptr_t pduel, uint8 playerid, uint8 location) {
+  int32 YGO_QueryFieldCount(intptr_t pduel, uint8 playerid, uint8 location) {
     return query_field_count(pduel, playerid, location);
   }
 
-  int32 OCG_QueryFieldCard(intptr_t pduel, uint8 playerid, uint8 location, uint32 query_flag, byte* buf, int32 use_cache) {
-    return query_field_card(pduel, playerid, location, query_flag, buf, use_cache);
+  int32 YGO_QueryFieldCard(intptr_t pduel, uint8 playerid, uint8 location, uint32 query_flag, byte* buf) {
+    return query_field_card(pduel, playerid, location, query_flag, buf, 0);
   }
 
-  void OCG_SetResponsei(intptr_t pduel, int32 value) {
+  void YGO_SetResponsei(intptr_t pduel, int32 value) {
     if (record_) {
       ReplayWriteInt8(4);
       ReplayWriteInt32(value);
@@ -2116,7 +2116,7 @@ private:
     set_responsei(pduel, value);
   }
 
-  void OCG_SetResponseb(intptr_t pduel, byte* buf) {
+  void YGO_SetResponseb(intptr_t pduel, byte* buf) {
     if (record_) {
       switch (msg_) {
         case MSG_SORT_CARD:
@@ -2245,13 +2245,13 @@ private:
     // but since we have shuffled deck, so just add in order
 
     for (int i = 0; i < main_deck.size(); i++) {
-      OCG_NewCard(pduel_, main_deck[i], player, player, LOCATION_DECK, 0,
+      YGO_NewCard(pduel_, main_deck[i], player, player, LOCATION_DECK, 0,
                POS_FACEDOWN_DEFENSE);
     }
 
     // add extra deck in reverse order following ygopro
     for (int i = int(extra_deck.size()) - 1; i >= 0; --i) {
-      OCG_NewCard(pduel_, extra_deck[i], player, player, LOCATION_EXTRA, 0,
+      YGO_NewCard(pduel_, extra_deck[i], player, player, LOCATION_EXTRA, 0,
                POS_FACEDOWN_DEFENSE);
     }
   }
@@ -2261,14 +2261,14 @@ private:
       if (eng_flag_ == PROCESSOR_END) {
         break;
       }
-      uint32_t res = OCG_Process(pduel_);
+      uint32_t res = YGO_Process(pduel_);
       dl_ = res & PROCESSOR_BUFFER_LEN;
       eng_flag_ = res & PROCESSOR_FLAG;
 
       if (dl_ == 0) {
         continue;
       }
-      OCG_GetMessage(pduel_, data_);
+      YGO_GetMessage(pduel_, data_);
       dp_ = 0;
       while (dp_ != dl_) {
         handle_message();
@@ -2327,7 +2327,7 @@ private:
 
   CardCode get_card_code(PlayerId player, uint8_t loc, uint8_t seq) {
     int32_t flags = QUERY_CODE;
-    int32_t bl = OCG_QueryCard(pduel_, player, loc, seq, flags, query_buf_, 0);
+    int32_t bl = YGO_QueryCard(pduel_, player, loc, seq, flags, query_buf_);
     qdp_ = 0;
     if (bl <= 0) {
       throw std::runtime_error("[get_card_code] Invalid card");
@@ -2340,7 +2340,7 @@ private:
     int32_t flags = QUERY_CODE | QUERY_ATTACK | QUERY_DEFENSE | QUERY_POSITION |
                     QUERY_LEVEL | QUERY_RANK | QUERY_LSCALE | QUERY_RSCALE |
                     QUERY_LINK;
-    int32_t bl = OCG_QueryCard(pduel_, player, loc, seq, flags, query_buf_, 0);
+    int32_t bl = YGO_QueryCard(pduel_, player, loc, seq, flags, query_buf_);
     qdp_ = 0;
     if (bl <= 0) {
       throw std::runtime_error("[get_card] Invalid card (bl <= 0)");
@@ -2382,7 +2382,7 @@ private:
                     QUERY_ATTACK | QUERY_DEFENSE | QUERY_EQUIP_CARD |
                     QUERY_OVERLAY_CARD | QUERY_COUNTERS | QUERY_LSCALE |
                     QUERY_RSCALE | QUERY_LINK;
-    int32_t bl = OCG_QueryFieldCard(pduel_, player, loc, flags, query_buf_, 0);
+    int32_t bl = YGO_QueryFieldCard(pduel_, player, loc, flags, query_buf_);
     qdp_ = 0;
     std::vector<Card> cards;
     while (true) {
@@ -2955,7 +2955,7 @@ private:
       if (!verbose_) {
         dp_ = dl_;
         resp_buf_[0] = 255;
-        OCG_SetResponseb(pduel_, resp_buf_);
+        YGO_SetResponseb(pduel_, resp_buf_);
         return;
       }
       auto player = read_u8();
@@ -2978,7 +2978,7 @@ private:
 
       fmt::println("sort card action not implemented");
       resp_buf_[0] = 255;
-      OCG_SetResponseb(pduel_, resp_buf_);
+      YGO_SetResponseb(pduel_, resp_buf_);
 
       // // generate all permutations
       // std::vector<int> perm(size);
@@ -2998,7 +2998,7 @@ private:
       //   const auto &option = options_[idx];
       //   if (option == "c") {
       //     resp_buf_[0] = 255;
-      //     OCG_SetResponseb(pduel_, resp_buf_);
+      //     YGO_SetResponseb(pduel_, resp_buf_);
       //     return;
       //   }
       //   std::istringstream iss(option);
@@ -3008,7 +3008,7 @@ private:
       //     resp_buf_[i] = uint8_t(x);
       //     i++;
       //   }
-      //   OCG_SetResponseb(pduel_, resp_buf_);
+      //   YGO_SetResponseb(pduel_, resp_buf_);
       // };
     } else if (msg_ == MSG_ADD_COUNTER) {
       if (!verbose_) {
@@ -3391,14 +3391,14 @@ private:
       to_play_ = player;
       callback_ = [this, n_activatables, n_attackables, to_ep, to_m2](int idx) {
         if (idx < n_activatables) {
-          OCG_SetResponsei(pduel_, idx << 16);
+          YGO_SetResponsei(pduel_, idx << 16);
         } else if (idx < (n_activatables + n_attackables)) {
           idx = idx - n_activatables;
-          OCG_SetResponsei(pduel_, (idx << 16) + 1);
+          YGO_SetResponsei(pduel_, (idx << 16) + 1);
         } else if ((options_[idx] == "e") && to_ep) {
-          OCG_SetResponsei(pduel_, 3);
+          YGO_SetResponsei(pduel_, 3);
         } else if ((options_[idx] == "m") && to_m2) {
-          OCG_SetResponsei(pduel_, 2);
+          YGO_SetResponsei(pduel_, 2);
         } else {
           throw std::runtime_error("Invalid option");
         }
@@ -3460,11 +3460,11 @@ private:
       to_play_ = player;
       callback_ = [this](int idx) {
         if (options_[idx] == "f") {
-          OCG_SetResponsei(pduel_, -1);
+          YGO_SetResponsei(pduel_, -1);
         } else {
           resp_buf_[0] = 1;
           resp_buf_[1] = idx;
-          OCG_SetResponseb(pduel_, resp_buf_);
+          YGO_SetResponseb(pduel_, resp_buf_);
         }
       };
 
@@ -3520,7 +3520,7 @@ private:
           for (int i = 0; i < min; ++i) {
             resp_buf_[i + 1] = comb[i];
           }
-          OCG_SetResponseb(pduel_, resp_buf_);
+          YGO_SetResponseb(pduel_, resp_buf_);
           discard_hand_ = false;
           return;
         }
@@ -3564,7 +3564,7 @@ private:
         for (int i = 0; i < comb.size(); ++i) {
           resp_buf_[i + 1] = comb[i];
         }
-        OCG_SetResponseb(pduel_, resp_buf_);
+        YGO_SetResponseb(pduel_, resp_buf_);
       };
     } else if (msg_ == MSG_SELECT_TRIBUTE) {
       auto player = read_u8();
@@ -3650,7 +3650,7 @@ private:
         for (int i = 0; i < comb.size(); ++i) {
           resp_buf_[i + 1] = comb[i];
         }
-        OCG_SetResponseb(pduel_, resp_buf_);
+        YGO_SetResponseb(pduel_, resp_buf_);
       };
     } else if (msg_ == MSG_SELECT_SUM) {
       auto mode = read_u8();
@@ -3793,7 +3793,7 @@ private:
         for (int i = 0; i < comb.size(); ++i) {
           resp_buf_[i + must_select_size + 1] = comb[i];
         }
-        OCG_SetResponseb(pduel_, resp_buf_);
+        YGO_SetResponseb(pduel_, resp_buf_);
       };
 
     } else if (msg_ == MSG_SELECT_CHAIN) {
@@ -3833,7 +3833,7 @@ private:
         // if (verbose_) {
         //   fmt::println("keep processing");
         // }
-        OCG_SetResponsei(pduel_, -1);
+        YGO_SetResponsei(pduel_, -1);
         return;
       }
 
@@ -3898,10 +3898,10 @@ private:
       callback_ = [this, forced](int idx) {
         const auto &option = options_[idx];
         if ((option == "c") && (!forced)) {
-          OCG_SetResponsei(pduel_, -1);
+          YGO_SetResponsei(pduel_, -1);
           return;
         }
-        OCG_SetResponsei(pduel_, idx);
+        YGO_SetResponsei(pduel_, idx);
       };
     } else if (msg_ == MSG_SELECT_YESNO) {
       auto player = read_u8();
@@ -3932,9 +3932,9 @@ private:
       to_play_ = player;
       callback_ = [this](int idx) {
         if (idx == 0) {
-          OCG_SetResponsei(pduel_, 1);
+          YGO_SetResponsei(pduel_, 1);
         } else if (idx == 1) {
-          OCG_SetResponsei(pduel_, 0);
+          YGO_SetResponsei(pduel_, 0);
         } else {
           throw std::runtime_error("Invalid option");
         }
@@ -4006,9 +4006,9 @@ private:
       to_play_ = player;
       callback_ = [this](int idx) {
         if (idx == 0) {
-          OCG_SetResponsei(pduel_, 1);
+          YGO_SetResponsei(pduel_, 1);
         } else if (idx == 1) {
-          OCG_SetResponsei(pduel_, 0);
+          YGO_SetResponsei(pduel_, 0);
         } else {
           throw std::runtime_error("Invalid option");
         }
@@ -4048,7 +4048,7 @@ private:
                                          ".");
         }
 
-        OCG_SetResponsei(pduel_, idx);
+        YGO_SetResponsei(pduel_, idx);
       };
     } else if (msg_ == MSG_SELECT_IDLECMD) {
       int32_t player = read_u8();
@@ -4162,29 +4162,29 @@ private:
         const auto &option = options_[idx];
         char cmd = option[0];
         if (cmd == 'b') {
-          OCG_SetResponsei(pduel_, 6);
+          YGO_SetResponsei(pduel_, 6);
         } else if (cmd == 'e') {
-          OCG_SetResponsei(pduel_, 7);
+          YGO_SetResponsei(pduel_, 7);
         } else {
           auto spec = option.substr(2);
           if (cmd == 's') {
             uint32_t idx_ = idx;
-            OCG_SetResponsei(pduel_, idx_ << 16);
+            YGO_SetResponsei(pduel_, idx_ << 16);
           } else if (cmd == 'c') {
             uint32_t idx_ = idx - spsummon_offset;
-            OCG_SetResponsei(pduel_, (idx_ << 16) + 1);
+            YGO_SetResponsei(pduel_, (idx_ << 16) + 1);
           } else if (cmd == 'r') {
             uint32_t idx_ = idx - repos_offset;
-            OCG_SetResponsei(pduel_, (idx_ << 16) + 2);
+            YGO_SetResponsei(pduel_, (idx_ << 16) + 2);
           } else if (cmd == 'm') {
             uint32_t idx_ = idx - mset_offset;
-            OCG_SetResponsei(pduel_, (idx_ << 16) + 3);
+            YGO_SetResponsei(pduel_, (idx_ << 16) + 3);
           } else if (cmd == 't') {
             uint32_t idx_ = idx - set_offset;
-            OCG_SetResponsei(pduel_, (idx_ << 16) + 4);
+            YGO_SetResponsei(pduel_, (idx_ << 16) + 4);
           } else if (cmd == 'v') {
             uint32_t idx_ = idx - activate_offset;
-            OCG_SetResponsei(pduel_, (idx_ << 16) + 5);
+            YGO_SetResponsei(pduel_, (idx_ << 16) + 5);
           } else {
             throw std::runtime_error("Invalid option: " + option);
           }
@@ -4224,7 +4224,7 @@ private:
         resp_buf_[0] = plr;
         resp_buf_[1] = loc;
         resp_buf_[2] = seq;
-        OCG_SetResponseb(pduel_, resp_buf_);
+        YGO_SetResponseb(pduel_, resp_buf_);
       };
     } else if (msg_ == MSG_SELECT_DISFIELD) {
       auto player = read_u8();
@@ -4260,7 +4260,7 @@ private:
         resp_buf_[0] = plr;
         resp_buf_[1] = loc;
         resp_buf_[2] = seq;
-        OCG_SetResponseb(pduel_, resp_buf_);
+        YGO_SetResponseb(pduel_, resp_buf_);
       };
     } else if (msg_ == MSG_ANNOUNCE_NUMBER) {
       auto player = read_u8();
@@ -4289,7 +4289,7 @@ private:
       }
       to_play_ = player;
       callback_ = [this](int idx) {
-        OCG_SetResponsei(pduel_, idx);
+        YGO_SetResponsei(pduel_, idx);
       };
     } else if (msg_ == MSG_ANNOUNCE_ATTRIB) {
       auto player = read_u8();
@@ -4341,7 +4341,7 @@ private:
           resp |= 1 << (option[i] - '1');
           i += 2;
         }
-        OCG_SetResponsei(pduel_, resp);
+        YGO_SetResponsei(pduel_, resp);
       };
 
     } else if (msg_ == MSG_SELECT_POSITION) {
@@ -4373,7 +4373,7 @@ private:
       to_play_ = player;
       callback_ = [this](int idx) {
         uint8_t pos = options_[idx][0] - '1';
-        OCG_SetResponsei(pduel_, 1 << pos);
+        YGO_SetResponsei(pduel_, 1 << pos);
       };
     } else {
       show_deck(0);
@@ -4409,7 +4409,7 @@ private:
     win_reason_ = reason;
 
     std::unique_lock<std::shared_timed_mutex> ulock(duel_mtx);
-    OCG_EndDuel(pduel_);
+    YGO_EndDuel(pduel_);
     ulock.unlock();
 
     duel_started_ = false;

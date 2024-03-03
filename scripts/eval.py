@@ -99,7 +99,7 @@ if __name__ == "__main__":
     args.env_threads = min(args.env_threads or args.num_envs, args.num_envs)
     args.torch_threads = args.torch_threads or int(os.getenv("OMP_NUM_THREADS", "4"))
 
-    deck = init_ygopro(args.lang, args.deck, args.code_list_file)
+    deck = init_ygopro(args.env_id, args.lang, args.deck, args.code_list_file)
 
     args.deck1 = args.deck1 or deck
     args.deck2 = args.deck2 or deck

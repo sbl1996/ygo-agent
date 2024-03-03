@@ -1,8 +1,11 @@
 package("edopro-core")
 
-    set_homepage("https://github.com/edo9300/ygopro-core")
+    -- set_homepage("https://github.com/edo9300/ygopro-core")
 
-    set_urls("https://github.com/edo9300/ygopro-core.git")
+    -- set_urls("https://github.com/edo9300/ygopro-core.git")
+
+    set_sourcedir(path.join(os.scriptdir(), "edopro-core"))
+    set_policy("package.install_always", true)
 
     add_deps("lua")
 
@@ -26,6 +29,12 @@ package("edopro-core")
                 io.writefile(file, table.concat(lines, "\n"))
             end
         end
+
+        check_and_insert("interpreter.h", 12, "extern \"C\" {")
+        check_and_insert("interpreter.h", 14, "}")
+
+        check_and_insert("interpreter.h", 16, "extern \"C\" {")
+        check_and_insert("interpreter.h", 19, "}")
 
         local configs = {}
         if package:config("shared") then
