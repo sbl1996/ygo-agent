@@ -83,42 +83,55 @@ combinations_with_weight(const std::vector<int> &weights, int r) {
 }
 
 inline bool sum_to2(const std::vector<std::vector<int>> &w,
-                    const std::vector<int> ind, int i, int r) {
+                    const std::vector<int> ind, int i, int r,
+                    bool max = false) {
   if (r <= 0) {
-    return false;
+    if (max) {
+      return true;
+    } else {
+      return false;
+    }
   }
   int n = ind.size();
   const auto &w_ = w[ind[i]];
   if (i == n - 1) {
     if (w_.size() == 1) {
-      return w_[0] == r;
+      if (max) {
+        return w_[0] >= r;
+      } else {
+        return w_[0] == r;
+      }
     } else {
-      return w_[0] == r || w_[1] == r;
+      if (max) {
+        return w_[0] >= r || w_[1] >= r;
+      } else {
+        return w_[0] == r || w_[1] == r;
+      }
     }
   }
   if (w_.size() == 1) {
-    return sum_to2(w, ind, i + 1, r - w_[0]);
+    return sum_to2(w, ind, i + 1, r - w_[0], max);
   } else {
-    return sum_to2(w, ind, i + 1, r - w_[0]) ||
-           sum_to2(w, ind, i + 1, r - w_[1]);
+    return sum_to2(w, ind, i + 1, r - w_[0], max) ||
+           sum_to2(w, ind, i + 1, r - w_[1], max);
   }
 }
 
 inline bool sum_to2(const std::vector<std::vector<int>> &w,
-                    const std::vector<int> ind, int r) {
-  return sum_to2(w, ind, 0, r);
+                    const std::vector<int> ind, int r, bool max = false) {
+  return sum_to2(w, ind, 0, r, max);
 }
 
 inline std::vector<std::vector<int>>
 combinations_with_weight2(const std::vector<std::vector<int>> &weights,
-                          int r) {
+                          int r, bool max = false) {
   int n = weights.size();
   std::vector<std::vector<int>> results;
 
   for (int k = 1; k <= n; k++) {
     std::vector<std::vector<int>> combs = combinations(n, k);
     for (const auto &comb : combs) {
-      if (sum_to2(weights, comb, r)) {
+      if (sum_to2(weights, comb, r, max)) {
         results.push_back(comb);
       }
     }
@@ -309,7 +322,7 @@ static const ankerl::unordered_dense::map<int, std::string> system_strings = {
     {1622, "[%ls] Missed timing"}
 };
 
-static std::string get_system_string(int desc) {
+static std::string get_system_string(uint32_t desc) {
   auto it = system_strings.find(desc);
   if (it != system_strings.end()) {
     return it->second;
@@ -862,6 +875,7 @@ public:
     position_ = info.position;
   }
 
+  const CardCode &code() const { return code_; }
   const std::string &name() const { return name_; }
   const std::string &desc() const { return desc_; }
   const uint32_t &type() const { return type_; }
@@ -933,11 +947,14 @@ inline uint32_t ls_to_spec_code(const loc_info &info, PlayerId player) {
 // TODO: 7% performance loss
 static std::shared_timed_mutex duel_mtx;
 
-inline Card db_query_card(const SQLite::Database &db, CardCode code) {
+inline Card db_query_card(const SQLite::Database &db, CardCode code, bool may_absent = false) {
   SQLite::Statement query1(db, "SELECT * FROM datas WHERE id=?");
   query1.bind(1, code);
   bool found = query1.executeStep();
   if (!found) {
+    if (may_absent) {
+      return Card();
+    }
     std::string msg = "[db_query_card] Card not found: " + std::to_string(code);
     throw std::runtime_error(msg);
   }
@@ -973,7 +990,8 @@ inline Card db_query_card(const SQLite::Database &db, CardCode code) {
               defense, race, attribute, link_marker, name, desc, strings);
 }
 
-inline OCG_CardData db_query_card_data(const SQLite::Database &db, CardCode code) {
+inline OCG_CardData db_query_card_data(
+  const SQLite::Database &db, CardCode code, bool may_absent = false) {
   SQLite::Statement query(db, "SELECT * FROM datas WHERE id=?");
   query.bind(1, code);
   query.executeStep();
@@ -989,10 +1007,17 @@ inline OCG_CardData db_query_card_data(const SQLite::Database &db, CardCode code
       setcodes.push_back(setcode);
     }
   }
-  // memory leak here, but we only use it globally
-  uint16_t* setcodes_p = new uint16_t[setcodes.size()];
-  std::copy(setcodes.begin(), setcodes.end(), setcodes_p);
-  card.setcodes = setcodes_p;
+  if (setcodes.size()) {
+    setcodes.push_back(0);
+    // memory leak here, but we only use it globally
+    uint16_t* setcodes_p = new uint16_t[setcodes.size()];
+    for (int i = 0; i < setcodes.size(); i++) {
+      setcodes_p[i] = setcodes[i];
+    }
+    card.setcodes = setcodes_p;
+  } else {
+    card.setcodes = nullptr;
+  }
 
   card.type = query.getColumn("type");
   card.attack = query.getColumn("atk");
@@ -1081,11 +1106,17 @@ inline void sort_extra_deck(std::vector<CardCode> &deck) {
 }
 
 inline void preload_deck(const SQLite::Database &db,
-                         const std::vector<CardCode> &deck) {
+                         const std::vector<CardCode> &deck,
+                         bool may_absent = false) {
   for (const auto &code : deck) {
     auto it = cards_.find(code);
     if (it == cards_.end()) {
-      cards_[code] = db_query_card(db, code);
+      auto card = db_query_card(db, code, may_absent);
+      if ((card.code() == 0) && may_absent) {
+        fmt::println("[preload_deck] Card not found: {}", code);
+        continue;
+      }
+      cards_[code] = card;
       if (card_ids_.find(code) == card_ids_.end()) {
         throw std::runtime_error("Card not found in code list: " +
                                  std::to_string(code));
@@ -1094,7 +1125,7 @@ inline void preload_deck(const SQLite::Database &db,
 
     auto it2 = cards_data_.find(code);
     if (it2 == cards_data_.end()) {
-      cards_data_[code] = db_query_card_data(db, code);
+      cards_data_[code] = db_query_card_data(db, code, may_absent);
     }
   }
 }
@@ -1110,8 +1141,12 @@ inline void g_DataReader(void* payload, uint32_t code, OCG_CardData* data) {
 static std::shared_timed_mutex scripts_mtx;
 
 inline const char *read_card_script(const std::string &path, int *lenptr) {
-  std::ifstream file(path, std::ios::binary);
+  // edopro_script/c*.lua copied from ProjectIgnis/script/official
+  auto full_path = "edopro_script/" + path;
+  std::ifstream file(full_path, std::ios::binary);
   if (!file) {
+    fmt::print("Unable to open script file: {}\n", full_path);
+    *lenptr = 0;
     return nullptr;
   }
   file.seekg(0, std::ios::end);
@@ -1131,15 +1166,20 @@ inline int g_ScriptReader(void* payload, OCG_Duel duel, const char* name) {
     lock.unlock();
     int len;
     const char *buf = read_card_script(path, &len);
-    if (buf == nullptr) {
-      return 0;
-    }
     std::unique_lock<std::shared_timed_mutex> ulock(scripts_mtx);
     cards_script_[path] = {buf, len};
     it = cards_script_.find(path);
   }
   int len = it->second.len;
-  return len && OCG_LoadScript(duel, it->second.buf, static_cast<uint32_t>(len), name);
+  auto res = len && OCG_LoadScript(duel, it->second.buf, static_cast<uint32_t>(len), name);
+  // if (!res) {
+  //   fmt::print("Failed to load script: {}\n", path);
+  // }
+  return res;
+}
+
+void g_LogHandler(void* payload, const char* string, int type) {
+  fmt::println("[LOG] type: {}, string: {}", type, string);
 }
 
 static void init_module(const std::string &db_path,
@@ -1167,7 +1207,7 @@ static void init_module(const std::string &db_path,
 
     preload_deck(db, main_deck);
     preload_deck(db, extra_deck);
-    preload_deck(db, side_deck);
+    preload_deck(db, side_deck, true);
   }
 
   for (auto &[name, deck] : extra_decks_) {
@@ -1429,7 +1469,7 @@ protected:
   int dl_ = 0;
   int fdl_ = 0;
 
-  uint8_t query_buf_[4096];
+  uint8_t query_buf_[16384];
   int qdp_ = 0;
 
   uint8_t resp_buf_[128];
@@ -1634,8 +1674,8 @@ public:
           ReplayWriteInt32(code);
         }
         ReplayWriteInt32(extra_deck.size());
-        // for (int j = int(extra_deck.size()) - 1; j >= 0; --j) {
-        for (int j = 0; j < extra_deck.size(); ++j) {
+        for (int j = int(extra_deck.size()) - 1; j >= 0; --j) {
+        // for (int j = 0; j < extra_deck.size(); ++j) {
           ReplayWriteInt32(extra_deck[j]);
         }
       }
@@ -2177,7 +2217,8 @@ private:
     opts.scriptReader = &g_ScriptReader;
     opts.payload2 = nullptr;
 
-		opts.logHandler = [](void* /*payload*/, const char* /*string*/, int /*type*/) {};
+		// opts.logHandler = [](void* /*payload*/, const char* /*string*/, int /*type*/) {};
+    opts.logHandler = &g_LogHandler;
 		opts.payload3 = nullptr;
 
 		opts.cardReaderDone = [](void* /*payload*/, OCG_CardData* /*data*/) {};
@@ -2188,6 +2229,8 @@ private:
     if (create_status != OCG_DUEL_CREATION_SUCCESS) {
       throw std::runtime_error("Failed to create duel");
     }
+    g_ScriptReader(nullptr, pduel_, "constant.lua");
+    g_ScriptReader(nullptr, pduel_, "utility.lua");
     return opts;
   }
 
@@ -2213,7 +2256,7 @@ private:
 
   uint32_t YGO_GetMessage(OCG_Duel pduel, uint8_t* buf) {
     uint32_t len;
-    auto buf_ = OCG_DuelGetMessage(pduel_, &len);
+    auto buf_ = OCG_DuelGetMessage(pduel, &len);
     memcpy(buf, buf_, len);
     return len;
   }
@@ -2226,7 +2269,7 @@ private:
     // TODO: overlay
     OCG_QueryInfo info = {query_flag, playerid, location, sequence};
     uint32_t length;
-    auto buf_ = OCG_DuelQuery(pduel, &length, info);
+    auto buf_ = static_cast<uint8_t*>(OCG_DuelQuery(pduel, &length, info));
     if (length > 0) {
       memcpy(buf, buf_, length);      
     }
@@ -2234,13 +2277,18 @@ private:
   }
 
   int32_t YGO_QueryFieldCount(OCG_Duel pduel, uint8_t playerid, uint8_t location) {
-    return 0;
-    // return OCG_DuelQueryCount(pduel, playerid, location);
+    return OCG_DuelQueryCount(pduel, playerid, location);
   }
 
   int32_t OCG_QueryFieldCard(OCG_Duel pduel, uint8_t playerid, uint8_t location, uint32_t query_flag, uint8_t* buf, int32_t use_cache) {
-    return 0;
-    // return query_field_card(pduel, playerid, location, query_flag, buf, use_cache);
+    // TODO: overlay
+    OCG_QueryInfo info = {query_flag, playerid, location};
+    uint32_t length;
+    auto buf_ = static_cast<uint8_t*>(OCG_DuelQueryLocation(pduel, &length, info));
+    if (length > 0) {
+      memcpy(buf, buf_, length);      
+    }
+    return length;
   }
 
   void YGO_SetResponsei(OCG_Duel pduel, int32_t value) {
@@ -2290,10 +2338,10 @@ private:
       return;
     }
 
-    // SpecIndex spec2index;
-    // _set_obs_cards(state["obs:cards_"_], spec2index, to_play_);
+    SpecIndex spec2index;
+    _set_obs_cards(state["obs:cards_"_], spec2index, to_play_);
 
-    // _set_obs_global(state["obs:global_"_], to_play_);
+    _set_obs_global(state["obs:global_"_], to_play_);
 
     // we can't shuffle because idx must be stable in callback
     if (n_options > max_options()) {
@@ -2305,11 +2353,10 @@ private:
     //   fmt::println("{} {}", key, val);
     // }
 
-    // _set_obs_actions(state["obs:actions_"_], spec2index, msg_, options_);
+    _set_obs_actions(state["obs:actions_"_], spec2index, msg_, options_);
 
     n_options = options_.size();
     state["info:num_options"_] = n_options;
-    return;
 
     // update h_card_ids from state
     auto &h_card_ids = to_play_ == 0 ? h_card_ids_0_ : h_card_ids_1_;
@@ -2474,6 +2521,12 @@ private:
     return v;
   }
 
+  uint32_t q_read_u16_() {
+    uint32_t v = *reinterpret_cast<uint16_t *>(query_buf_ + qdp_);
+    qdp_ += 2;
+    return v;
+  }
+
   uint32_t q_read_u16() {
     qdp_ += 6;
     uint32_t v = *reinterpret_cast<uint16_t *>(query_buf_ + qdp_);
@@ -2511,12 +2564,16 @@ private:
     int32_t bl  = YGO_QueryCard(pduel_, player, loc, seq, flags, query_buf_);
     qdp_ = 0;
     if (bl <= 0) {
-      throw std::runtime_error("[get_card] Invalid card (bl <= 0)");
+      std::string err = fmt::format("Player: {}, loc: {}, seq: {}, length: {}", player, loc, seq, bl);
+      throw std::runtime_error("[get_card] Invalid card " + err);
     }
     CardCode code = q_read_u32();
     Card c = c_get_card(code);
     uint32_t position = q_read_u32();
-    c.set_location(position);
+    c.controler_ = player;
+    c.location_ = loc;
+    c.sequence_ = seq;
+    c.position_ = position;
     uint32_t level = q_read_u32();
     // TODO: check negative level
     if ((level & 0xff) > 0) {
@@ -2544,88 +2601,94 @@ private:
   }
 
   std::vector<Card> get_cards_in_location(PlayerId player, uint8_t loc) {
-    return {};
-    // int32_t flags = QUERY_CODE | QUERY_POSITION | QUERY_LEVEL | QUERY_RANK |
-    //                 QUERY_ATTACK | QUERY_DEFENSE | QUERY_EQUIP_CARD |
-    //                 QUERY_OVERLAY_CARD | QUERY_COUNTERS | QUERY_LSCALE |
-    //                 QUERY_RSCALE | QUERY_LINK;
-    // int32_t bl = OCG_QueryFieldCard(pduel_, player, loc, flags, query_buf_, 0);
-    // qdp_ = 0;
-    // std::vector<Card> cards;
-    // while (true) {
-    //   if (qdp_ >= bl) {
-    //     break;
-    //   }
-    //   uint32_t f = q_read_u32();
-    //   if (f == LEN_EMPTY) {
-    //     continue;
-    //     ;
-    //   }
-    //   f = q_read_u32();
-    //   CardCode code = q_read_u32();
-    //   Card c = c_get_card(code);
+    int32_t flags = QUERY_CODE | QUERY_POSITION | QUERY_LEVEL | QUERY_RANK |
+                    QUERY_ATTACK | QUERY_DEFENSE | QUERY_EQUIP_CARD |
+                    QUERY_OVERLAY_CARD | QUERY_COUNTERS | QUERY_LSCALE |
+                    QUERY_RSCALE | QUERY_LINK;
+    int32_t bl = OCG_QueryFieldCard(pduel_, player, loc, flags, query_buf_, 0);
 
-    //   uint8_t controller = q_read_u8();
-    //   uint8_t location = q_read_u8();
-    //   uint8_t sequence = q_read_u8();
-    //   uint8_t position = q_read_u8();
-    //   c.controler_ = controller;
-    //   c.location_ = location;
-    //   c.sequence_ = sequence;
-    //   c.position_ = position;
-
-    //   uint32_t level = q_read_u32();
-    //   if ((level & 0xff) > 0) {
-    //     c.level_ = level & 0xff;
-    //   }
-    //   uint32_t rank = q_read_u32();
-    //   if ((rank & 0xff) > 0) {
-    //     c.level_ = rank & 0xff;
-    //   }
-    //   c.attack_ = q_read_u32();
-    //   c.defense_ = q_read_u32();
-
-    //   // TODO: equip_target
-    //   if (f & QUERY_EQUIP_CARD) {
-    //     q_read_u32();
-    //   }
-
-    //   uint32_t n_xyz = q_read_u32();
-    //   for (int i = 0; i < n_xyz; ++i) {
-    //     auto code = q_read_u32();
-    //     Card c_ = c_get_card(code);
-    //     c_.controler_ = controller;
-    //     c_.location_ = location | LOCATION_OVERLAY;
-    //     c_.sequence_ = sequence;
-    //     c_.position_ = i;
-    //     cards.push_back(c_);
-    //   }
-
-    //   // TODO: counters
-    //   uint32_t n_counters = q_read_u32();
-    //   for (int i = 0; i < n_counters; ++i) {
-    //     if (i == 0) {
-    //       c.counter_ = q_read_u32();
-    //     }
-    //     else {
-    //       q_read_u32();
-    //     }
-    //   }
-
-    //   c.lscale_ = q_read_u32();
-    //   c.rscale_ = q_read_u32();
-
-    //   uint32_t link = q_read_u32();
-    //   uint32_t link_marker = q_read_u32();
-    //   if ((link & 0xff) > 0) {
-    //     c.level_ = link & 0xff;
-    //   }
-    //   if (link_marker > 0) {
-    //     c.defense_ = link_marker;
-    //   }
-    //   cards.push_back(c);
+    // fmt::println("player: {}, loc: {}, bl {}", player, location2str.at(loc), bl);
+    // print byte by byte
+    // for (int i = 0; i < bl; ++i) {
+    //   fmt::print("{:02x} ", query_buf_[i]);
     // }
-    // return cards;
+    // fmt::print("\n");
+
+    qdp_ = 4;
+    std::vector<Card> cards;
+    while (true) {
+      if (qdp_ >= bl || bl - qdp_ < 136) {
+        break;
+      }
+      uint16_t v = q_read_u16_();
+      while (v == 0) {
+        v = q_read_u16_();
+      }
+      qdp_ += 4;
+
+      CardCode code = q_read_u32_();
+      Card c = c_get_card(code);
+
+      uint32_t position = q_read_u32();
+      c.controler_ = player;
+      c.location_ = loc;
+      // TODO: fix this
+      uint32_t sequence = 0;
+      c.sequence_ = sequence;
+      c.position_ = position;
+
+      uint32_t level = q_read_u32();
+    // TODO: check negative level
+      if ((level & 0xff) > 0) {
+        c.level_ = level & 0xff;
+      }
+      uint32_t rank = q_read_u32();
+      if ((rank & 0xff) > 0) {
+        c.level_ = rank & 0xff;
+      }
+      c.attack_ = q_read_u32();
+      c.defense_ = q_read_u32();
+
+      // TODO: equip_target
+      qdp_ += 16;
+
+      uint32_t n_xyz = q_read_u32();
+      for (int i = 0; i < n_xyz; ++i) {
+        auto code = q_read_u32_();
+        Card c_ = c_get_card(code);
+        c_.controler_ = player;
+        c_.location_ = loc | LOCATION_OVERLAY;
+        c_.sequence_ = sequence;
+        c_.position_ = i;
+        cards.push_back(c_);
+      }
+
+      // TODO: counters
+      uint32_t n_counters = q_read_u32();
+      for (int i = 0; i < n_counters; ++i) {
+        if (i == 0) {
+          c.counter_ = q_read_u32_();
+        }
+        else {
+          q_read_u32();
+        }
+      }
+
+      c.lscale_ = q_read_u32();
+      c.rscale_ = q_read_u32();
+
+      uint32_t link = q_read_u32();
+      uint32_t link_marker = q_read_u32_();
+      if ((link & 0xff) > 0) {
+        c.level_ = link & 0xff;
+      }
+      if (link_marker > 0) {
+        c.defense_ = link_marker;
+      }
+      qdp_ += 6;
+      cards.push_back(c);
+    }
+    return cards;
   }
 
   std::vector<Card> read_cardlist(bool extra = false, bool extra8 = false) {
@@ -2716,6 +2779,11 @@ private:
 
     if (verbose_) {
       fmt::println("Message {}, full {}, length {}, dp {}", msg_to_string(msg_), fdl_, dl_, dp_);
+      // print byte by byte
+      for (int i = dp_; i < dl_; ++i) {
+        fmt::print("{:02x} ", data_[i]);
+      }
+      fmt::print("\n");
     }
 
     if (msg_ == MSG_DRAW) {
@@ -2890,9 +2958,9 @@ private:
         return;
       }
       CardCode code1 = read_u32();
-      uint32_t loc1 = read_u32();
+      auto loc1 = read_loc_info();
       CardCode code2 = read_u32();
-      uint32_t loc2 = read_u32();
+      auto loc2 = read_loc_info();
       Card cards[2];
       cards[0] = c_get_card(code1);
       cards[1] = c_get_card(code2);
@@ -2946,10 +3014,19 @@ private:
         auto t = cardlist_info_for_player(target, pl);
         players_[pl]->notify(fmt::format("{} equipped to {}.", c, t));
       }
+    } else if (msg_ == MSG_PLAYER_HINT) {
+      if (!verbose_) {
+        dp_ = dl_;
+        return;
+      }
+      auto player = read_u8();
+      auto hint_type = read_u8();
+      auto value = compat_read<uint32_t, uint64_t>();
+      // TODO: handle this
+      return;
     } else if (msg_ == MSG_HINT) {
       auto hint_type = read_u8();
       auto player = read_u8();
-      // TODO: different with ygopro-core
       auto value = compat_read<uint32_t, uint64_t>();
 
       if (hint_type == HINT_SELECTMSG && value == 501) {
@@ -3026,25 +3103,42 @@ private:
                  ") changed from " + prevpos_str + " to " + pos_str + ".");
       op->notify("The position of card " + opspec + " (" + card.name_ +
                  ") changed from " + prevpos_str + " to " + pos_str + ".");
-    } else if (msg_ == MSG_BECOME_TARGET) {
+    } else if (msg_ == MSG_BECOME_TARGET || msg_ == MSG_CARD_SELECTED) {
       if (!verbose_) {
         dp_ = dl_;
         return;
       }
-      auto u = read_u8();
-      uint32_t target = read_u32();
-      uint8_t tc = target & 0xff;
-      uint8_t tl = (target >> 8) & 0xff;
-      uint8_t tseq = (target >> 16) & 0xff;
-      Card card = get_card(tc, tl, tseq);
+      auto count = compat_read<uint8_t, uint32_t>();
+      std::vector<Card> cards;
+      cards.reserve(count);
+      for (int i = 0; i < count; ++i) {
+        auto info = read_loc_info();
+        auto c = info.controler;
+        auto loc = info.location;
+        auto seq = info.sequence;
+        cards.push_back(get_card(c, loc, seq));
+      }
       auto name = players_[chaining_player_]->nickname_;
       for (PlayerId pl = 0; pl < 2; pl++) {
-        auto spec = card.get_spec(pl);
-        auto tcname = card.name_;
-        if ((card.controler_ != pl) && (card.position_ & POS_FACEDOWN)) {
-          tcname = position_to_string(card.position_) + " card";
+        std::string str = name;
+        if (msg_ == MSG_BECOME_TARGET) {
+          str += " targets ";
+        } else {
+          str += " selects ";
         }
-        players_[pl]->notify(name + " targets " + spec + " (" + tcname + ")");
+        for (int i = 0; i < count; ++i) {
+          auto card = cards[i];
+          auto spec = card.get_spec(pl);
+          auto tcname = card.name_;
+          if ((card.controler_ != pl) && (card.position_ & POS_FACEDOWN)) {
+            tcname = position_to_string(card.position_) + " card";
+          }
+          str += spec + " (" + tcname + ")";
+          if (i < count - 1) {
+            str += ", ";
+          }
+        }
+        players_[pl]->notify(str);
       }
     } else if (msg_ == MSG_CONFIRM_DECKTOP) {
       if (!verbose_) {
@@ -3340,17 +3434,19 @@ private:
       }
       CardCode code = read_u32();
       Card card = c_get_card(code);
-      card.set_location(read_u32());
+      card.set_location(read_loc_info());
       const auto &nickname = players_[card.controler_]->nickname_;
-      for (auto pl : players_) {
+      for (PlayerId p = 0; p < 2; p++) {
+        auto pl = players_[p];
         auto pos = card.get_position();
         auto atk = std::to_string(card.attack_);
         auto def = std::to_string(card.defense_);
+        std::string name = p == card.controler_ ? "You" : nickname;
         if (card.type_ & TYPE_LINK) {
-          pl->notify(nickname + " special summoning " + card.name_ + " (" +
+          pl->notify(name + " special summoning " + card.name_ + " (" +
                      atk + ") in " + pos + " position.");
         } else {
-          pl->notify(nickname + " special summoning " + card.name_ + " (" +
+          pl->notify(name + " special summoning " + card.name_ + " (" +
                      atk + "/" + def + ") in " + pos + " position.");
         }
       }
@@ -3374,12 +3470,12 @@ private:
       }
       CardCode code = read_u32();
       Card card = c_get_card(code);
-      card.set_location(read_u32());
+      card.set_location(read_loc_info());
       auto tc = read_u8();
       auto tl = read_u8();
-      auto ts = read_u8();
-      uint32_t desc = read_u32();
-      auto cs = read_u8();
+      auto ts = compat_read<uint8_t, uint32_t>();
+      uint32_t desc = compat_read<uint32_t, uint64_t>();
+      auto cs = compat_read<uint8_t, uint32_t>();
       auto c = card.controler_;
       PlayerId o = 1 - c;
       chaining_player_ = c;
@@ -3551,7 +3647,7 @@ private:
         options_.push_back("v " + spec);
         if (verbose_) {
           auto [loc, seq, pos] = spec_to_ls(spec);
-          auto c = get_card(to_play_, loc, seq);
+          auto c = get_card(player, loc, seq);
           pl->notify("v " + spec + ": activate " + c.name_ + " (" +
                      std::to_string(c.attack_) + "/" +
                      std::to_string(c.defense_) + ")");
@@ -3561,7 +3657,7 @@ private:
         options_.push_back("a " + spec);
         if (verbose_) {
           auto [loc, seq, pos] = spec_to_ls(spec);
-          auto c = get_card(to_play_, loc, seq);
+          auto c = get_card(player, loc, seq);
           if (c.type_ & TYPE_LINK) {
             pl->notify("a " + spec + ": " + c.name_ + " (" +
                        std::to_string(c.attack_) + ") attack");
@@ -3779,15 +3875,32 @@ private:
         };
       } else {
         callback_ = [this, combs](int idx) {
-          int32_t ret = 3;
-          memcpy(resp_buf_, &ret, sizeof(ret));
-          uint8_t v = 0;
           const auto &comb = combs[idx];
-          for (int i = 0; i < comb.size(); ++i) {
-            v |= (1 << comb[i]);
+    			uint32_t maxseq = 0;
+          uint32_t size = comb.size();
+          for (auto &c : comb) {
+            maxseq = std::max(maxseq, static_cast<uint32_t>(c));
           }
-          memcpy(resp_buf_ + 4, &v, sizeof(v));
-          YGO_SetResponseb(pduel_, resp_buf_, 5);
+          auto ret = GetSuitableReturn(maxseq, size);
+          memcpy(resp_buf_, &ret, sizeof(ret));
+          if (ret == 3) {
+            uint8_t v = 0;
+            for (int i = 0; i < comb.size(); ++i) {
+              v |= (1 << comb[i]);
+            }
+            memcpy(resp_buf_ + 4, &v, sizeof(v));
+            YGO_SetResponseb(pduel_, resp_buf_, 5);
+          } else if (ret == 2) {
+            memcpy(resp_buf_ + 4, &size, sizeof(size));
+            for (int i = 0; i < size; ++i) {
+              uint8_t v = comb[i];
+              memcpy(resp_buf_ + 8 + i, &v, sizeof(v));
+            }
+            YGO_SetResponseb(pduel_, resp_buf_, 8 + size);
+          } else {
+            auto err = fmt::format("Invalid return value: {}", ret);
+            throw std::runtime_error(err);
+          }
         };
       }
     } else if (msg_ == MSG_SELECT_TRIBUTE) {
@@ -3879,15 +3992,32 @@ private:
         };
       } else {
         callback_ = [this, combs](int idx) {
-          int32_t ret = 3;
-          memcpy(resp_buf_, &ret, sizeof(ret));
-          uint8_t v = 0;
           const auto &comb = combs[idx];
-          for (int i = 0; i < comb.size(); ++i) {
-            v |= (1 << comb[i]);
+    			uint32_t maxseq = 0;
+          uint32_t size = comb.size();
+          for (auto &c : comb) {
+            maxseq = std::max(maxseq, static_cast<uint32_t>(c));
           }
-          memcpy(resp_buf_ + 4, &v, sizeof(v));
-          YGO_SetResponseb(pduel_, resp_buf_, 5);
+          auto ret = GetSuitableReturn(maxseq, size);
+          memcpy(resp_buf_, &ret, sizeof(ret));
+          if (ret == 3) {
+            uint8_t v = 0;
+            for (int i = 0; i < comb.size(); ++i) {
+              v |= (1 << comb[i]);
+            }
+            memcpy(resp_buf_ + 4, &v, sizeof(v));
+            YGO_SetResponseb(pduel_, resp_buf_, 5);
+          } else if (ret == 2) {
+            memcpy(resp_buf_ + 4, &size, sizeof(size));
+            for (int i = 0; i < size; ++i) {
+              uint8_t v = comb[i];
+              memcpy(resp_buf_ + 8 + i, &v, sizeof(v));
+            }
+            YGO_SetResponseb(pduel_, resp_buf_, 8 + size);
+          } else {
+            auto err = fmt::format("Invalid return value: {}", ret);
+            throw std::runtime_error(err);
+          }
         };
       }
     } else if (msg_ == MSG_SELECT_SUM) {
@@ -3912,8 +4042,13 @@ private:
               " not implemented for MSG_SELECT_SUM");
         }
       } else {
-        throw std::runtime_error("mode: " + std::to_string(mode) +
-                                 " not implemented for MSG_SELECT_SUM");
+        if (min != 0 || max != 0 || must_select_size != 0) {
+          std::string err = fmt::format(
+              "min: {}, max: {}, must select size: {} not implemented for "
+              "MSG_SELECT_SUM, mode: {}",
+              min, max, must_select_size, mode);
+          throw std::runtime_error(err);
+        }
       }
 
       std::vector<int> must_select_params;
@@ -3924,7 +4059,7 @@ private:
       must_select_params.reserve(must_select_size);
       must_select_specs.reserve(must_select_size);
 
-      int expected;
+      int expected = val;
       if (verbose_) {
         std::vector<Card> must_select;
         must_select.reserve(must_select_size);
@@ -3944,15 +4079,17 @@ private:
           must_select.push_back(card);
           must_select_params.push_back(param);
         }
-        expected = int(val) - (must_select_params[0] & 0xff);
+        if (must_select_size > 0) {
+          expected -= must_select_params[0] & 0xff;
+        }
         auto pl = players_[player];
         pl->notify("Select cards with a total value of " +
-                   std::to_string(expected) + ", seperated by spaces.");
+                  std::to_string(expected) + ", seperated by spaces.");
         for (const auto &card : must_select) {
           auto spec = card.get_spec(player);
           must_select_specs.push_back(spec);
           pl->notify(card.name_ + " (" + spec +
-                     ") must be selected, automatically selected.");
+                    ") must be selected, automatically selected.");
         }
       } else {
         for (int i = 0; i < must_select_size; ++i) {
@@ -3972,7 +4109,9 @@ private:
           must_select_specs.push_back(spec);
           must_select_params.push_back(param);
         }
-        expected = int(val) - (must_select_params[0] & 0xff);
+        if (must_select_size > 0) {
+          expected -= must_select_params[0] & 0xff;
+        }
       }
 
       uint8_t select_size = compat_read<uint8_t, uint32_t>();
@@ -4039,13 +4178,14 @@ private:
       }
 
       std::vector<std::vector<int>> combs =
-          combinations_with_weight2(card_levels, expected);
+          combinations_with_weight2(card_levels, expected, true);
 
       for (const auto &comb : combs) {
         std::string option = "";
-        for (int j = 0; j < min; ++j) {
+        int size = comb.size();
+        for (int j = 0; j < size; ++j) {
           option += select_specs[comb[j]];
-          if (j < min - 1) {
+          if (j < size - 1) {
             option += " ";
           }
         }
@@ -4117,10 +4257,6 @@ private:
           cards.push_back(card);
           spec_codes.push_back(card.get_spec_code(player));
         } else {
-          PlayerId c = read_u8();
-          uint8_t loc = read_u8();
-          uint8_t seq = read_u8();
-          uint8_t pos = read_u8();
           spec_codes.push_back(
             ls_to_spec_code(loc_info, player));
         }
@@ -4210,26 +4346,27 @@ private:
       auto player = read_u8();
 
       if (verbose_) {
-        auto desc = read_u32();
+        auto desc = compat_read<uint32_t, uint64_t>();
         auto pl = players_[player];
         std::string opt;
-        if (desc > 10000) {
-          auto code = desc >> 4;
-          auto card = c_get_card(code);
-          auto opt_idx = desc & 0xf;
-          if (opt_idx < card.strings_.size()) {
-            opt = card.strings_[opt_idx];
-          }
-          if (opt.empty()) {
-            opt = "Unknown question from " + card.name_ + ". Yes or no?";
-          }
-        } else {
-          opt = get_system_string(desc);
-        }
+        // if (desc > 10000) {
+        //   auto code = desc >> 4;
+        //   auto card = c_get_card(code);
+        //   auto opt_idx = desc & 0xf;
+        //   if (opt_idx < card.strings_.size()) {
+        //     opt = card.strings_[opt_idx];
+        //   }
+        //   if (opt.empty()) {
+        //     opt = "Unknown question from " + card.name_ + ". Yes or no?";
+        //   }
+        // } else {
+        //   opt = get_system_string(desc);
+        // }
+        opt = "TODO: MSG_SELECT_YESNO desc";
         pl->notify(opt);
         pl->notify("Please enter y or n.");
       } else {
-        dp_ += 4;
+        compat_read<uint32_t, uint64_t>();
       }
       options_ = {"y", "n"};
       to_play_ = player;
@@ -4320,21 +4457,22 @@ private:
         auto pl = players_[player];
         pl->notify("Select an option:");
         for (int i = 0; i < size; ++i) {
-          auto opt = read_u32();
+          auto opt = compat_read<uint32_t, uint64_t>();
           std::string s;
-          if (opt > 10000) {
-            CardCode code = opt >> 4;
-            s = c_get_card(code).strings_[opt & 0xf];
-          } else {
-            s = get_system_string(opt);
-          }
+          // if (opt > 10000) {
+          //   CardCode code = opt >> 4;
+          //   s = c_get_card(code).strings_[opt & 0xf];
+          // } else {
+          //   s = get_system_string(opt);
+          // }
+          s = "TODO: MSG_SELECT_OPTION desc";
           std::string option = std::to_string(i + 1);
           options_.push_back(option);
           pl->notify(option + ": " + s);
         }
       } else {
         for (int i = 0; i < size; ++i) {
-          dp_ += 4;
+          compat_read<uint32_t, uint64_t>();
           options_.push_back(std::to_string(i + 1));
         }
       }
@@ -4567,7 +4705,7 @@ private:
       int count = read_u8();
       std::vector<int> numbers;
       for (int i = 0; i < count; ++i) {
-        int number = read_u32();
+        int number = compat_read<uint32_t, uint64_t>();
         if (number <= 0 || number > 12) {
           throw std::runtime_error("Number " + std::to_string(number) +
                                    " not implemented for announce number");
@@ -4680,8 +4818,26 @@ private:
       show_deck(1);
       throw std::runtime_error(
         fmt::format("Unknown message {}, length {}, dp {}",
-        msg_to_string(msg_), dl_, dp_));
+        msg_, dl_, dp_));
     }
+  }
+
+  int GetSuitableReturn(uint32_t maxseq, uint32_t size) {
+    using nl8 = std::numeric_limits<uint8_t>;
+    using nl16 = std::numeric_limits<uint16_t>;
+    using nl32 = std::numeric_limits<uint32_t>;
+    if(maxseq < nl8::max()) {
+      if(maxseq >= size * nl8::digits)
+        return 2;
+    } else if(maxseq < nl16::max()) {
+      if(maxseq >= size * nl16::digits)
+        return 1;
+    }
+    else if(maxseq < nl32::max()) {
+      if(maxseq >= size * nl32::digits)
+        return 0;
+    }
+    return 3;
   }
 
   void _damage(uint8_t player, uint32_t amount) {

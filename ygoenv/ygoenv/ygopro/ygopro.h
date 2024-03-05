@@ -1051,6 +1051,7 @@ static std::shared_timed_mutex scripts_mtx;
 inline byte *read_card_script(const std::string &path, int *lenptr) {
   std::ifstream file(path, std::ios::binary);
   if (!file) {
+    *lenptr = 0;
     return nullptr;
   }
   file.seekg(0, std::ios::end);
@@ -1070,9 +1071,6 @@ inline byte *script_reader_callback(const char *name, int *lenptr) {
     lock.unlock();
     int len;
     byte *buf = read_card_script(path, &len);
-    if (buf == nullptr) {
-      return nullptr;
-    }
     std::unique_lock<std::shared_timed_mutex> ulock(scripts_mtx);
     cards_script_[path] = {buf, len};
     it = cards_script_.find(path);
@@ -3142,15 +3140,17 @@ private:
       Card card = c_get_card(code);
       card.set_location(read_u32());
       const auto &nickname = players_[card.controler_]->nickname_;
-      for (auto pl : players_) {
+      for (PlayerId p = 0; p < 2; p++) {
+        auto pl = players_[p];
         auto pos = card.get_position();
         auto atk = std::to_string(card.attack_);
         auto def = std::to_string(card.defense_);
+        std::string name = p == card.controler_ ? "You" : nickname;
         if (card.type_ & TYPE_LINK) {
-          pl->notify(nickname + " special summoning " + card.name_ + " (" +
+          pl->notify(name + " special summoning " + card.name_ + " (" +
                      atk + ") in " + pos + " position.");
         } else {
-          pl->notify(nickname + " special summoning " + card.name_ + " (" +
+          pl->notify(name + " special summoning " + card.name_ + " (" +
                      atk + "/" + def + ") in " + pos + " position.");
         }
       }
@@ -3351,7 +3351,7 @@ private:
         options_.push_back("v " + spec);
         if (verbose_) {
           auto [loc, seq, pos] = spec_to_ls(spec);
-          auto c = get_card(to_play_, loc, seq);
+          auto c = get_card(player, loc, seq);
           pl->notify("v " + spec + ": activate " + c.name_ + " (" +
                      std::to_string(c.attack_) + "/" +
                      std::to_string(c.defense_) + ")");
@@ -3361,7 +3361,7 @@ private:
         options_.push_back("a " + spec);
         if (verbose_) {
           auto [loc, seq, pos] = spec_to_ls(spec);
-          auto c = get_card(to_play_, loc, seq);
+          auto c = get_card(player, loc, seq);
           if (c.type_ & TYPE_LINK) {
             pl->notify("a " + spec + ": " + c.name_ + " (" +
                        std::to_string(c.attack_) + ") attack");
@@ -3653,6 +3653,7 @@ private:
         YGO_SetResponseb(pduel_, resp_buf_);
       };
     } else if (msg_ == MSG_SELECT_SUM) {
+      // ritual summoning mode 1 (max)
       auto mode = read_u8();
       auto player = read_u8();
       auto val = read_u32();
@@ -3774,9 +3775,10 @@ private:
 
       for (const auto &comb : combs) {
         std::string option = "";
-        for (int j = 0; j < min; ++j) {
+        int size = comb.size();
+        for (int j = 0; j < size; ++j) {
           option += select_specs[comb[j]];
-          if (j < min - 1) {
+          if (j < size - 1) {
             option += " ";
           }
         }
