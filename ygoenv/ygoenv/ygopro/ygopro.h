@@ -17,6 +17,7 @@
 #include <SQLiteCpp/SQLiteCpp.h>
 #include <SQLiteCpp/VariadicBind.h>
 #include <ankerl/unordered_dense.h>
+#include <unordered_map>
 
 #include "ygoenv/core/async_envpool.h"
 #include "ygoenv/core/env.h"
@@ -1236,7 +1237,7 @@ public:
     int n_action_feats = 10 + conf["max_multi_select"_] * 2;
     return MakeDict(
         "obs:cards_"_.Bind(Spec<uint8_t>({conf["max_cards"_] * 2, 40})),
-        "obs:global_"_.Bind(Spec<uint8_t>({9})),
+        "obs:global_"_.Bind(Spec<uint8_t>({23})),
         "obs:actions_"_.Bind(
             Spec<uint8_t>({conf["max_options"_], n_action_feats})),
         "obs:h_actions_"_.Bind(
@@ -1650,17 +1651,32 @@ public:
     float reward = 0;
     int reason = 0;
     if (done_) {
-      float base_reward = 1.0;
-      int win_turn = turn_count_ - winner_;
-      if (win_turn <= 1) {
-        base_reward = 8.0;
-      } else if (win_turn <= 3) {
-        base_reward = 4.0;
-      } else if (win_turn <= 5) {
-        base_reward = 2.0;
+      float base_reward;
+      if (winner_ == 0) {
+        if (turn_count_ <= 1) {
+          // FTK
+          base_reward = 16.0;
+        } else if (turn_count_ <= 3) {
+          base_reward = 8.0;
+        } else if (turn_count_ <= 5) {
+          base_reward = 4.0;
+        } else if (turn_count_ <= 7) {
+          base_reward = 2.0;
+        } else {
+          base_reward = 0.5 + 1.0 / (turn_count_ - 7);
+        }
       } else {
-        base_reward = 0.5 + 1.0 / (win_turn - 5);
+        if (turn_count_ <= 1) {
+          base_reward = 8.0;
+        } else if (turn_count_ <= 3) {
+          base_reward = 4.0;
+        } else if (turn_count_ <= 5) {
+          base_reward = 2.0;
+        } else {
+          base_reward = 0.5 + 1.0 / (turn_count_ - 5);
+        }
       }
+
       if (play_mode_ == kSelfPlay) {
         // to_play_ is the previous player
         reward = winner_ == to_play_ ? base_reward : -base_reward;
@@ -1698,8 +1714,9 @@ public:
 private:
   using SpecIndex = ankerl::unordered_dense::map<std::string, uint16_t>;
 
-  void _set_obs_cards(TArray<uint8_t> &f_cards, SpecIndex &spec2index,
-                      PlayerId to_play) {
+  std::tuple<SpecIndex, std::vector<int>> _set_obs_cards(TArray<uint8_t> &f_cards, PlayerId to_play) {
+    SpecIndex spec2index;
+    std::vector<int> loc_n_cards;
     for (auto pi = 0; pi < 2; pi++) {
       const PlayerId player = (to_play + pi) % 2;
       const bool opponent = pi == 1;
@@ -1718,6 +1735,7 @@ private:
         }
         if (opponent && hidden_for_opponent) {
           auto n_cards = YGO_QueryFieldCount(pduel_, player, location);
+          loc_n_cards.push_back(n_cards);
           for (auto i = 0; i < n_cards; i++) {
             f_cards(offset, 2) = location2id.at(location);
             f_cards(offset, 4) = 1;
@@ -1725,7 +1743,9 @@ private:
           }
         } else {
           std::vector<Card> cards = get_cards_in_location(player, location);
-          for (int i = 0; i < cards.size(); ++i) {
+          int n_cards = cards.size();
+          loc_n_cards.push_back(n_cards);
+          for (int i = 0; i < n_cards; ++i) {
             const auto &c = cards[i];
             auto spec = c.get_spec(opponent);
             bool hide = false;
@@ -1744,6 +1764,7 @@ private:
         }
       }
     }
+    return {spec2index, loc_n_cards};
   }
 
   void _set_obs_card_(TArray<uint8_t> &f_cards, int offset, const Card &c,
@@ -1797,7 +1818,7 @@ private:
     }
   }
 
-  void _set_obs_global(TArray<uint8_t> &feat, PlayerId player) {
+  void _set_obs_global(TArray<uint8_t> &feat, PlayerId player, const std::vector<int> &loc_n_cards) {
     uint8_t me = player;
     uint8_t op = 1 - player;
 
@@ -1813,6 +1834,10 @@ private:
     feat(5) = phase2id.at(current_phase_);
     feat(6) = (me == 0) ? 1 : 0;
     feat(7) = (me == tp_) ? 1 : 0;
+
+    for (int i = 0; i < loc_n_cards.size(); i++) {
+      feat(8 + i) = static_cast<uint8_t>(loc_n_cards[i]);
+    }
   }
 
   void _set_obs_action_spec(TArray<uint8_t> &feat, int i, int j,
@@ -2148,14 +2173,13 @@ private:
 
     if (n_options == 0) {
       state["info:num_options"_] = 1;
-      state["obs:global_"_][8] = uint8_t(1);
+      state["obs:global_"_][22] = uint8_t(1);
       return;
     }
 
-    SpecIndex spec2index;
-    _set_obs_cards(state["obs:cards_"_], spec2index, to_play_);
+    auto [spec2index, loc_n_cards] = _set_obs_cards(state["obs:cards_"_], to_play_);
 
-    _set_obs_global(state["obs:global_"_], to_play_);
+    _set_obs_global(state["obs:global_"_], to_play_, loc_n_cards);
 
     // we can't shuffle because idx must be stable in callback
     if (n_options > max_options()) {

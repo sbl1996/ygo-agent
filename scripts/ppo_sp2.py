@@ -633,7 +633,8 @@ def main():
             eval_stats = torch.tensor([eval_return, eval_ep_len, eval_win_rate], dtype=torch.float32, device=device)
 
             # sync the statistics
-            dist.all_reduce(eval_stats, op=dist.ReduceOp.AVG)
+            if args.world_size > 1:
+                dist.all_reduce(eval_stats, op=dist.ReduceOp.AVG)
             eval_return, eval_ep_len, eval_win_rate = eval_stats.cpu().numpy()
             if rank == 0:
                 writer.add_scalar("charts/eval_return", eval_return, global_step)

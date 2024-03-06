@@ -45,6 +45,9 @@ class Encoder(nn.Module):
         self.bin_points = nn.Parameter(bin_points, requires_grad=False)
         self.bin_intervals = nn.Parameter(bin_intervals, requires_grad=False)
 
+        self.count_embed = nn.Embedding(100, c // 16)
+        self.hand_count_embed = nn.Embedding(100, c // 16)
+
         if embedding_shape is None:
             n_embed, embed_dim = 999, 1024
         elif isinstance(embedding_shape, int):
@@ -88,12 +91,15 @@ class Encoder(nn.Module):
         self.if_first_embed = nn.Embedding(2, c // 8)
         self.is_my_turn_embed = nn.Embedding(2, c // 8)
 
-        self.global_norm_pre = nn.LayerNorm(c, elementwise_affine=affine)
+        self.my_deck_fc_emb = linear(1024, c // 4)
+
+        self.global_norm_pre = nn.LayerNorm(c * 2, elementwise_affine=affine)
         self.global_net = nn.Sequential(
-            nn.Linear(c, c),
+            nn.Linear(c * 2, c * 2),
             nn.ReLU(),
-            nn.Linear(c, c),
+            nn.Linear(c * 2, c * 2),
         )
+        self.global_proj = nn.Linear(c * 2, c)
         self.global_norm = nn.LayerNorm(c, elementwise_affine=False)
 
         divisor = 8
@@ -235,13 +241,20 @@ class Encoder(nn.Module):
         x_g_lp = self.lp_fc_emb(self.num_transform(x_global_1[:, 0:2]))
         x_g_oppo_lp = self.oppo_lp_fc_emb(self.num_transform(x_global_1[:, 2:4]))
 
-        x_global_2 = x[:, 4:-1].long()
+        x_global_2 = x[:, 4:8].long()
         x_g_turn = self.turn_embed(x_global_2[:, 0])
         x_g_phase = self.phase_embed(x_global_2[:, 1])
         x_g_if_first = self.if_first_embed(x_global_2[:, 2])
         x_g_is_my_turn = self.is_my_turn_embed(x_global_2[:, 3])
 
-        x_global = torch.cat([x_g_lp, x_g_oppo_lp, x_g_turn, x_g_phase, x_g_if_first, x_g_is_my_turn], dim=-1)
+        x_global_3 = x[:, 8:22].long()
+        x_g_cs = self.count_embed(x_global_3).flatten(1)
+        x_g_my_hand_c = self.hand_count_embed(x_global_3[:, 1])
+        x_g_op_hand_c = self.hand_count_embed(x_global_3[:, 8])
+
+        x_global = torch.cat([
+            x_g_lp, x_g_oppo_lp, x_g_turn, x_g_phase, x_g_if_first, x_g_is_my_turn,
+            x_g_cs, x_g_my_hand_c, x_g_op_hand_c], dim=-1)
         return x_global
 
     def forward(self, x):
@@ -278,6 +291,7 @@ class Encoder(nn.Module):
         x_global = self.encode_global(x_global)
         x_global = self.global_norm_pre(x_global)
         f_global = x_global + self.global_net(x_global)
+        f_global = self.global_proj(f_global)
         f_global = self.global_norm(f_global)
         
         f_cards = f_cards + f_global.unsqueeze(1)
@@ -319,53 +333,6 @@ class Encoder(nn.Module):
         f_s_actions_ha = (f_actions * c_mask).sum(dim=1) / c_mask.sum(dim=1)
         f_state = torch.cat([f_s_cards_global, f_s_actions_ha], dim=-1)
         return f_actions, f_state, mask, valid
-
-
-# class PPOCritic(nn.Module):
-
-#     def __init__(self, channels):
-#         super(PPOCritic, self).__init__()
-#         c = channels
-
-#         self.net = nn.Sequential(
-#             nn.Linear(c * 2, c // 2),
-#             nn.ReLU(),
-#             nn.Linear(c // 2, 1),
-#         )
-
-#     def forward(self, f_state):
-#         return self.net(f_state)
-
-
-# class PPOActor(nn.Module):
-
-#     def __init__(self, channels):
-#         super(PPOActor, self).__init__()
-#         c = channels
-#         self.trans = nn.TransformerEncoderLayer(
-#             c, 4, c * 4, dropout=0.0, batch_first=True, norm_first=True, bias=False)
-#         self.head = nn.Sequential(
-#             nn.Linear(c, c // 4),
-#             nn.ReLU(),
-#             nn.Linear(c // 4, 1),
-#         )
-
-#     def forward(self, f_actions, mask, action):
-#         f_actions = self.trans(f_actions, src_key_padding_mask=mask)
-#         logits = self.head(f_actions)[..., 0]
-#         logits = logits.float()
-#         logits = logits.masked_fill(mask, float("-inf"))
-
-#         probs = Categorical(logits=logits)
-#         return probs.log_prob(action), probs.entropy()
-
-#     def predict(self, f_actions, mask):
-#         f_actions = self.trans(f_actions, src_key_padding_mask=mask)
-#         logits = self.head(f_actions)[..., 0]
-#         logits = logits.float()
-#         logits = logits.masked_fill(mask, float("-inf"))
-#         return logits
-
 
 class Actor(nn.Module):
 

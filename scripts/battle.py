@@ -46,12 +46,6 @@ class Args:
     num_embeddings: Optional[int] = None
     """the number of embeddings of the agent"""
 
-    player: int = -1
-    """the player to play as, -1 means random, 0 is the first player, 1 is the second player"""
-    play: bool = False
-    """whether to play the game"""
-    selfplay: bool = False
-    """whether to use selfplay"""
     record: bool = False
     """whether to record the game as YGOPro replays"""
 
@@ -62,23 +56,18 @@ class Args:
     verbose: bool = False
     """whether to print debug information"""
 
-    bot_type: Literal["random", "greedy"] = "greedy"
-    """the type of bot to use"""
-    strategy: Literal["random", "greedy"] = "greedy"
-    """the strategy to use if agent is not used"""
-
-    agent: bool = False
-    """whether to use the agent"""
     num_layers: int = 2
     """the number of layers for the agent"""
     num_channels: int = 128
     """the number of channels for the agent"""
-    checkpoint: Optional[str] = "checkpoints/agent.pt"
-    """the checkpoint to load"""
+    checkpoint1: Optional[str] = "checkpoints/agent.pt"
+    """the checkpoint to load for the first agent"""
+    checkpoint2: Optional[str] = "checkpoints/agent.pt"
+    """the checkpoint to load for the second agent"""
 
-    compile: bool = False
+    compile: bool = True
     """if toggled, the model will be compiled"""
-    optimize: bool = True
+    optimize: bool = False
     """if toggled, the model will be optimized"""
     torch_threads: Optional[int] = None
     """the number of threads to use for torch, defaults to ($OMP_NUM_THREADS or 2) * world_size"""
@@ -86,11 +75,15 @@ class Args:
     """the number of threads to use for envpool, defaults to `num_envs`"""
 
 
+def predict_step(agent, obs):
+    with torch.no_grad():
+        logits, values, _valid = agent(obs)
+    probs = torch.softmax(logits, dim=-1)
+    return probs
+
+
 if __name__ == "__main__":
     args = tyro.cli(Args)
-    if args.play:
-        args.num_envs = 1
-        args.verbose = True
     
     if args.record:
         assert args.num_envs == 1, "Recording only works with a single environment"
@@ -108,15 +101,14 @@ if __name__ == "__main__":
     random.seed(seed)
     np.random.seed(seed)
 
-    if args.agent:
-        import torch
-        torch.manual_seed(args.seed)
-        torch.backends.cudnn.deterministic = args.torch_deterministic
+    import torch
+    torch.manual_seed(args.seed)
+    torch.backends.cudnn.deterministic = args.torch_deterministic
 
-        torch.set_num_threads(args.torch_threads)
-        torch.set_float32_matmul_precision('high')
+    torch.set_num_threads(args.torch_threads)
+    torch.set_float32_matmul_precision('high')
 
-        device = torch.device("cuda" if torch.cuda.is_available() and args.cuda else "cpu")
+    device = torch.device("cuda" if torch.cuda.is_available() and args.cuda else "cpu")
 
     num_envs = args.num_envs
 
@@ -128,45 +120,46 @@ if __name__ == "__main__":
         seed=seed,
         deck1=args.deck1,
         deck2=args.deck2,
-        player=args.player,
+        player=-1,
         max_options=args.max_options,
         n_history_actions=args.n_history_actions,
-        play_mode='human' if args.play else ('self' if args.selfplay else ('bot' if args.bot_type == "greedy" else "random")),
+        play_mode='self',
         verbose=args.verbose,
         record=args.record,
     )
     envs.num_envs = num_envs
     envs = RecordEpisodeStatistics(envs)
 
-    if args.agent:
-        # count lines of code_list
-        embedding_shape = args.num_embeddings
-        if embedding_shape is None:
-            with open(args.code_list_file, "r") as f:
-                code_list = f.readlines()
-                embedding_shape = len(code_list)
-        L = args.num_layers
-        agent = Agent(args.num_channels, L, L, 1, embedding_shape).to(device)
-        # agent = agent.eval()
-        if args.checkpoint:
-            state_dict = torch.load(args.checkpoint, map_location=device)
-            if not args.compile:
-                prefix = "_orig_mod."
-                state_dict = {k[len(prefix):] if k.startswith(prefix) else k: v for k, v in state_dict.items()}
-            print(agent.load_state_dict(state_dict))
+    embedding_shape = args.num_embeddings
+    if embedding_shape is None:
+        with open(args.code_list_file, "r") as f:
+            code_list = f.readlines()
+            embedding_shape = len(code_list)
+    L = args.num_layers
+    agent1 = Agent(args.num_channels, L, L, 1, embedding_shape).to(device)
+    agent2 = Agent(args.num_channels, L, L, 1, embedding_shape).to(device)
 
-        if args.compile:
-            agent = torch.compile(agent, mode='reduce-overhead')
-        elif args.optimize:
+    for agent, ckpt in zip([agent1, agent2], [args.checkpoint1, args.checkpoint2]):
+        state_dict = torch.load(ckpt, map_location=device)
+        if not args.compile:
+            prefix = "_orig_mod."
+            state_dict = {k[len(prefix):] if k.startswith(prefix) else k: v for k, v in state_dict.items()}
+        print(agent.load_state_dict(state_dict))
+
+    if args.compile:
+        predict_step = torch.compile(predict_step, mode='reduce-overhead')
+    else:
+        if args.optimize:
             obs = create_obs(envs.observation_space, (num_envs,), device=device)
             def optimize_for_inference(agent):
                 with torch.no_grad():
                     traced_model = torch.jit.trace(agent, (obs,), check_tolerance=False, check_trace=False)
                     return torch.jit.optimize_for_inference(traced_model)
-            agent = optimize_for_inference(agent)
+            agent1 = optimize_for_inference(agent1)
+            agent2 = optimize_for_inference(agent2)
 
     obs, infos = envs.reset()
-    next_to_play = infos['to_play']
+    next_to_play_ = infos['to_play']
 
     episode_rewards = []
     episode_lengths = []
@@ -177,6 +170,12 @@ if __name__ == "__main__":
     start = time.time()
     start_step = step
 
+    player1_ = np.concatenate([
+        np.zeros(num_envs // 2, dtype=np.int64),
+        np.ones(num_envs // 2, dtype=np.int64)
+    ])
+    player1 = torch.from_numpy(player1_).to(device=device)
+
     model_time = env_time = 0
     while True:
         if start_step == 0 and len(episode_lengths) > int(args.num_episodes * 0.1):
@@ -184,36 +183,22 @@ if __name__ == "__main__":
             start_step = step
             model_time = env_time = 0
 
-        if args.agent:
-            _start = time.time()
-            obs = optree.tree_map(lambda x: torch.from_numpy(x).to(device=device), obs)
-            with torch.no_grad():
-                logits, values, _valid = agent(obs)
-            probs = torch.softmax(logits, dim=-1)
-            probs = probs.cpu().numpy()
-            if args.verbose:
-                print([f"{p:.4f}" for p in probs[probs != 0].tolist()])
-                print(f"{values[0].item():.4f}")
-            actions = probs.argmax(axis=1)
-            model_time += time.time() - _start
-        else:
-            if args.strategy == "random":
-                actions = np.random.randint(infos['num_options'])
-            else:
-                actions = np.zeros(num_envs, dtype=np.int32)
+        _start = time.time()
+        next_to_play = torch.from_numpy(next_to_play_).to(device=device) 
+        obs = optree.tree_map(lambda x: torch.from_numpy(x).to(device=device), obs)
+        probs1 = predict_step(agent1, obs).clone()
+        probs2 = predict_step(agent2, obs).clone()
 
-        # for k, v in obs.items():
-        #     v = v[0]
-        #     if k == 'cards_':
-        #         v = np.concatenate([np.arange(v.shape[0])[:, None], v], axis=1)
-        #     print(k, v.tolist())
-        # print(infos)
-        # print(actions[0])
-        to_play = next_to_play
+        probs = torch.where((next_to_play == player1)[:, None], probs1, probs2)
+        probs = probs.cpu().numpy()
+        actions = probs.argmax(axis=1)
+        model_time += time.time() - _start
+
+        to_play = next_to_play_
 
         _start = time.time()
         obs, rewards, dones, infos = envs.step(actions)
-        next_to_play = infos['to_play']
+        next_to_play_ = infos['to_play']
         env_time += time.time() - _start
 
         step += 1
@@ -221,17 +206,11 @@ if __name__ == "__main__":
         for idx, d in enumerate(dones):
             if d:
                 win_reason = infos['win_reason'][idx]
+                pl = 1 if to_play[idx] == player1_[idx] else -1
                 episode_length = infos['l'][idx]
-                episode_reward = infos['r'][idx]
-                if args.selfplay:
-                    pl = 1 if to_play[idx] == 0 else -1
-                    winner = 0 if episode_reward * pl > 0 else 1
-                    win = 1 - winner
-                else:
-                    if episode_reward < 0:
-                        win = 0
-                    else:
-                        win = 1
+                episode_reward = infos['r'][idx] * pl
+
+                win = 1 if episode_reward > 0 else 0
 
                 episode_lengths.append(episode_length)
                 episode_rewards.append(episode_reward)
@@ -242,9 +221,9 @@ if __name__ == "__main__":
             break
 
     print(f"len={np.mean(episode_lengths)}, reward={np.mean(episode_rewards)}, win_rate={np.mean(win_rates)}, win_reason={np.mean(win_reasons)}")
-    if not args.play:
-        total_time = time.time() - start
-        total_steps = (step - start_step) * num_envs
-        print(f"SPS: {total_steps / total_time:.0f}, total_steps: {total_steps}")
-        print(f"total: {total_time:.4f}, model: {model_time:.4f}, env: {env_time:.4f}")
+
+    total_time = time.time() - start
+    total_steps = (step - start_step) * num_envs
+    print(f"SPS: {total_steps / total_time:.0f}, total_steps: {total_steps}")
+    print(f"total: {total_time:.4f}, model: {model_time:.4f}, env: {env_time:.4f}")
     
