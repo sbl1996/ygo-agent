@@ -174,9 +174,10 @@ if __name__ == "__main__":
     start = time.time()
     start_step = step
 
+    num_envs_half = num_envs // 2
     player1_ = np.concatenate([
-        np.zeros(num_envs // 2, dtype=np.int64),
-        np.ones(num_envs // 2, dtype=np.int64)
+        np.zeros(num_envs_half, dtype=np.int64),
+        np.ones(num_envs - num_envs_half, dtype=np.int64)
     ])
     player1 = torch.from_numpy(player1_).to(device=device)
 
@@ -221,6 +222,11 @@ if __name__ == "__main__":
                 win_rates.append(win)
                 win_reasons.append(1 if win_reason == 1 else 0)
                 sys.stderr.write(f"Episode {len(episode_lengths)}: length={episode_length}, reward={episode_reward}, win={win}, win_reason={win_reason}\n")
+
+                if args.verbose:
+                    player1_ = 1 - player1_
+                    player1 = 1 - player1
+
         if len(episode_lengths) >= args.num_episodes:
             break
 
