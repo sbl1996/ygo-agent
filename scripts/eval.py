@@ -80,6 +80,9 @@ class Args:
     """if toggled, the model will be compiled"""
     optimize: bool = True
     """if toggled, the model will be optimized"""
+    convert: bool = False
+    """if toggled, the model will be converted to a jit model and the program will exit"""
+
     torch_threads: Optional[int] = None
     """the number of threads to use for torch, defaults to ($OMP_NUM_THREADS or 2) * world_size"""
     env_threads: Optional[int] = 16
@@ -156,6 +159,21 @@ if __name__ == "__main__":
             print(agent.load_state_dict(state_dict))
 
         if args.compile:
+            if args.convert:
+                # Don't support dynamic shapes and very slow inference
+                raise NotImplementedError
+                # obs = create_obs(envs.observation_space, (num_envs,), device=device)
+                # dynamic_shapes = {"x": {}}
+                # # batch_dim = torch.export.Dim("batch", min=1, max=64)
+                # batch_dim = None
+                # for k, v in obs.items():
+                #     dynamic_shapes["x"][k] = {0: batch_dim}
+                # program = torch.export.export(
+                #     agent, (obs,),
+                #     dynamic_shapes=dynamic_shapes,
+                # )
+                # torch.export.save(program, args.checkpoint + "2")
+                # exit(0)
             agent = torch.compile(agent, mode='reduce-overhead')
         elif args.optimize:
             obs = create_obs(envs.observation_space, (num_envs,), device=device)
@@ -164,6 +182,10 @@ if __name__ == "__main__":
                     traced_model = torch.jit.trace(agent, (obs,), check_tolerance=False, check_trace=False)
                     return torch.jit.optimize_for_inference(traced_model)
             agent = optimize_for_inference(agent)
+            if args.convert:
+                torch.jit.save(agent, args.checkpoint + "j")
+                print(f"Optimized model saved to {args.checkpoint}j")
+                exit(0)
 
     obs, infos = envs.reset()
     next_to_play = infos['to_play']

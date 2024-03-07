@@ -65,7 +65,7 @@ class Args:
     checkpoint2: Optional[str] = "checkpoints/agent.pt"
     """the checkpoint to load for the second agent"""
 
-    compile: bool = True
+    compile: bool = False
     """if toggled, the model will be compiled"""
     optimize: bool = False
     """if toggled, the model will be optimized"""
@@ -130,33 +130,37 @@ if __name__ == "__main__":
     envs.num_envs = num_envs
     envs = RecordEpisodeStatistics(envs)
 
-    embedding_shape = args.num_embeddings
-    if embedding_shape is None:
-        with open(args.code_list_file, "r") as f:
-            code_list = f.readlines()
-            embedding_shape = len(code_list)
-    L = args.num_layers
-    agent1 = Agent(args.num_channels, L, L, 1, embedding_shape).to(device)
-    agent2 = Agent(args.num_channels, L, L, 1, embedding_shape).to(device)
-
-    for agent, ckpt in zip([agent1, agent2], [args.checkpoint1, args.checkpoint2]):
-        state_dict = torch.load(ckpt, map_location=device)
-        if not args.compile:
-            prefix = "_orig_mod."
-            state_dict = {k[len(prefix):] if k.startswith(prefix) else k: v for k, v in state_dict.items()}
-        print(agent.load_state_dict(state_dict))
-
-    if args.compile:
-        predict_step = torch.compile(predict_step, mode='reduce-overhead')
+    if args.checkpoint1.endswith(".ptj"):
+        agent1 = torch.jit.load(args.checkpoint1)
+        agent2 = torch.jit.load(args.checkpoint2)
     else:
-        if args.optimize:
-            obs = create_obs(envs.observation_space, (num_envs,), device=device)
-            def optimize_for_inference(agent):
-                with torch.no_grad():
-                    traced_model = torch.jit.trace(agent, (obs,), check_tolerance=False, check_trace=False)
-                    return torch.jit.optimize_for_inference(traced_model)
-            agent1 = optimize_for_inference(agent1)
-            agent2 = optimize_for_inference(agent2)
+        embedding_shape = args.num_embeddings
+        if embedding_shape is None:
+            with open(args.code_list_file, "r") as f:
+                code_list = f.readlines()
+                embedding_shape = len(code_list)
+        L = args.num_layers
+        agent1 = Agent(args.num_channels, L, L, 1, embedding_shape).to(device)
+        agent2 = Agent(args.num_channels, L, L, 1, embedding_shape).to(device)
+
+        for agent, ckpt in zip([agent1, agent2], [args.checkpoint1, args.checkpoint2]):
+            state_dict = torch.load(ckpt, map_location=device)
+            if not args.compile:
+                prefix = "_orig_mod."
+                state_dict = {k[len(prefix):] if k.startswith(prefix) else k: v for k, v in state_dict.items()}
+            print(agent.load_state_dict(state_dict))
+
+        if args.compile:
+            predict_step = torch.compile(predict_step, mode='reduce-overhead')
+        else:
+            if args.optimize:
+                obs = create_obs(envs.observation_space, (num_envs,), device=device)
+                def optimize_for_inference(agent):
+                    with torch.no_grad():
+                        traced_model = torch.jit.trace(agent, (obs,), check_tolerance=False, check_trace=False)
+                        return torch.jit.optimize_for_inference(traced_model)
+                agent1 = optimize_for_inference(agent1)
+                agent2 = optimize_for_inference(agent2)
 
     obs, infos = envs.reset()
     next_to_play_ = infos['to_play']

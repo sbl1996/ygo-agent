@@ -530,7 +530,7 @@ def run(local_rank, world_size):
         # TRY NOT TO MODIFY: record rewards for plotting purposes
         if local_rank == 0:
             if iteration % args.save_interval == 0:
-                torch.save(agent1.state_dict(), os.path.join(ckpt_dir, f"agent.pth"))
+                torch.save(agent1.state_dict(), os.path.join(ckpt_dir, f"agent.pt"))
 
             writer.add_scalar("charts/learning_rate", optimizer.param_groups[0]["lr"], global_step)
             writer.add_scalar("losses/value_loss", v_loss.item(), global_step)
@@ -564,7 +564,7 @@ def run(local_rank, world_size):
             agent2.load_state_dict(agent1.state_dict())
             version += 1
             if local_rank == 0:
-                torch.save(agent1.state_dict(), os.path.join(ckpt_dir, f"agent_v{version}.pth"))
+                torch.save(agent1.state_dict(), os.path.join(ckpt_dir, f"agent_v{version}.pt"))
                 print(f"Updating agent at global_step={global_step} with win_rate={np.mean(avg_win_rates)}")
                 avg_win_rates.clear()
                 avg_ep_returns.clear()
@@ -614,7 +614,7 @@ def run(local_rank, world_size):
         dist.destroy_process_group()
     envs.close()
     if local_rank == 0:
-        torch.save(agent1.state_dict(), os.path.join(ckpt_dir, f"agent_final.pth"))
+        torch.save(agent1.state_dict(), os.path.join(ckpt_dir, f"agent_final.pt"))
         writer.close()
 
 

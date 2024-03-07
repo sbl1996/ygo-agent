@@ -21,7 +21,7 @@ from torch.cuda.amp import GradScaler, autocast
 from ygoai.utils import init_ygopro
 from ygoai.rl.utils import RecordEpisodeStatistics
 from ygoai.rl.agent import PPOAgent as Agent
-from ygoai.rl.dist import reduce_gradidents, mp_start, setup, fprint
+from ygoai.rl.dist import reduce_gradidents, torchrun_setup, fprint
 from ygoai.rl.buffer import create_obs
 
 
@@ -118,8 +118,6 @@ class Args:
     """the number of iterations to save the model"""
     log_p: float = 1.0
     """the probability of logging"""
-    port: int = 12356
-    """the port to use for distributed training"""
     eval_episodes: int = 128
     """the number of episodes to evaluate the model"""
     eval_interval: int = 10
@@ -140,7 +138,12 @@ class Args:
     """the number of processes (computed in runtime)"""
 
 
-def run(local_rank, world_size):
+def main():
+    rank = int(os.environ.get("RANK", 0))
+    local_rank = int(os.environ.get("LOCAL_RANK", 0))
+    world_size = int(os.environ.get("WORLD_SIZE", 1))
+    print(f"rank={rank}, local_rank={local_rank}, world_size={world_size}")
+
     args = tyro.cli(Args)
     args.world_size = world_size
     args.local_num_envs = args.num_envs // args.world_size
@@ -158,12 +161,12 @@ def run(local_rank, world_size):
     torch.set_float32_matmul_precision('high')
 
     if args.world_size > 1:
-        setup(args.backend, local_rank, args.world_size, args.port)
+        torchrun_setup(args.backend, local_rank)
 
     timestamp = int(time.time())
     run_name = f"{args.env_id}__{args.exp_name}__{args.seed}__{timestamp}"
     writer = None
-    if local_rank == 0:
+    if rank == 0:
         from torch.utils.tensorboard import SummaryWriter
         writer = SummaryWriter(os.path.join(args.tb_dir, run_name))
         writer.add_text(
@@ -177,10 +180,10 @@ def run(local_rank, world_size):
 
     # TRY NOT TO MODIFY: seeding
     # CRUCIAL: note that we needed to pass a different seed for each data parallelism worker
-    args.seed += local_rank
+    args.seed += rank
     random.seed(args.seed)
     np.random.seed(args.seed)
-    torch.manual_seed(args.seed - local_rank)
+    torch.manual_seed(args.seed - rank)
     if args.torch_deterministic:
         torch.backends.cudnn.deterministic = True
     else:
@@ -188,7 +191,7 @@ def run(local_rank, world_size):
 
     device = torch.device(f"cuda:{local_rank}" if torch.cuda.is_available() and args.cuda else "cpu")
 
-    deck = init_ygopro("english", args.deck, args.code_list_file)
+    deck = init_ygopro(args.env_id, "english", args.deck, args.code_list_file)
     args.deck1 = args.deck1 or deck
     args.deck2 = args.deck2 or deck
 
@@ -429,7 +432,8 @@ def run(local_rank, world_size):
                             writer.add_scalar("charts/avg_win_rate", np.mean(avg_win_rates), global_step)
 
         collect_time = time.time() - collect_start
-        fprint(f"[Rank {local_rank}] collect_time={collect_time:.4f}, model_time={model_time:.4f}, env_time={env_time:.4f}")
+        if local_rank == 0:
+            fprint(f"collect_time={collect_time:.4f}, model_time={model_time:.4f}, env_time={env_time:.4f}")
 
         _start = time.time()
         # bootstrap value if not done
@@ -561,16 +565,17 @@ def run(local_rank, world_size):
         
         train_time = time.time() - _start
 
-        fprint(f"[Rank {local_rank}] train_time={train_time:.4f}, collect_time={collect_time:.4f}, bootstrap_time={bootstrap_time:.4f}")
+        if local_rank == 0:
+            fprint(f"train_time={train_time:.4f}, collect_time={collect_time:.4f}, bootstrap_time={bootstrap_time:.4f}")
 
         y_pred, y_true = b_values.cpu().numpy(), b_returns.cpu().numpy()
         var_y = np.var(y_true)
         explained_var = np.nan if var_y == 0 else 1 - np.var(y_true - y_pred) / var_y
 
         # TRY NOT TO MODIFY: record rewards for plotting purposes
-        if local_rank == 0:
+        if rank == 0:
             if iteration % args.save_interval == 0:
-                torch.save(agent.state_dict(), os.path.join(ckpt_dir, f"agent.pth"))
+                torch.save(agent.state_dict(), os.path.join(ckpt_dir, f"agent.pt"))
 
             writer.add_scalar("charts/learning_rate", optimizer.param_groups[0]["lr"], global_step)
             writer.add_scalar("losses/value_loss", v_loss.item(), global_step)
@@ -581,15 +586,17 @@ def run(local_rank, world_size):
             writer.add_scalar("losses/clipfrac", np.mean(clipfracs), global_step)
             writer.add_scalar("losses/explained_variance", explained_var, global_step)
 
-            SPS = int((global_step - warmup_steps) / (time.time() - start_time))
+        SPS = int((global_step - warmup_steps) / (time.time() - start_time))
 
-            # Warmup at first few iterations for accurate SPS measurement
-            SPS_warmup_iters = 10
-            if iteration == SPS_warmup_iters:
-                start_time = time.time()
-                warmup_steps = global_step
-            if iteration > SPS_warmup_iters:
+        # Warmup at first few iterations for accurate SPS measurement
+        SPS_warmup_iters = 10
+        if iteration == SPS_warmup_iters:
+            start_time = time.time()
+            warmup_steps = global_step
+        if iteration > SPS_warmup_iters:
+            if local_rank == 0:
                 fprint(f"SPS: {SPS}")
+            if rank == 0:
                 writer.add_scalar("charts/SPS", SPS, global_step)
 
         if iteration % args.eval_interval == 0:
@@ -628,11 +635,12 @@ def run(local_rank, world_size):
             # sync the statistics
             if args.world_size > 1:
                 dist.all_reduce(eval_stats, op=dist.ReduceOp.AVG)
-            if local_rank == 0:
-                eval_return, eval_ep_len, eval_win_rate = eval_stats.cpu().numpy()
+            eval_return, eval_ep_len, eval_win_rate = eval_stats.cpu().numpy()
+            if rank == 0:
                 writer.add_scalar("charts/eval_return", eval_return, global_step)
                 writer.add_scalar("charts/eval_ep_len", eval_ep_len, global_step)
                 writer.add_scalar("charts/eval_win_rate", eval_win_rate, global_step)
+            if local_rank == 0:
                 eval_time = time.time() - _start
                 fprint(f"eval_time={eval_time:.4f}, eval_ep_return={eval_return:.4f}, eval_ep_len={eval_ep_len:.1f}, eval_win_rate={eval_win_rate:.4f}")
 
@@ -641,10 +649,10 @@ def run(local_rank, world_size):
     if args.world_size > 1:
         dist.destroy_process_group()
     envs.close()
-    if local_rank == 0:
-        torch.save(agent.state_dict(), os.path.join(ckpt_dir, f"agent_final.pth"))
+    if rank == 0:
+        torch.save(agent.state_dict(), os.path.join(ckpt_dir, f"agent_final.pt"))
         writer.close()
 
 
 if __name__ == "__main__":
-    mp_start(run)
+    main()
