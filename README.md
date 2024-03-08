@@ -24,7 +24,22 @@ YGO Agent is a project to create a Yu-Gi-Oh! AI using deep learning (LLMs, RL). 
 
 
 ## Usage
-TODO
+
+### Serialize agent
+
+After training, we can serialize the trained agent model to a file for later use without keeping source code of the model. The serialized model file will end with `.ptj` (PyTorch JIT) extension.
+
+```bash
+python -u eval.py --agent --checkpoint checkpoints/1234_1000M.pt --num_embeddings 999 --convert --optimize
+```
+
+### Battle between two agents
+
+We can use `battle.py` to let two agents play against each other and find out which one is better.
+
+```bash
+python -u battle.py --deck ../assets/deck --checkpoint1 checkpoints/1234_1000M.ptj --checkpoint2 checkpoints/9876_100M.ptj --num-episodes=256 --num_envs=32 --seed 0
+```
 
 ### Running
 TODO

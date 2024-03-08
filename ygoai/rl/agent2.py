@@ -17,6 +17,7 @@ def make_bin_params(x_max=32000, n_bins=32, sig_bins=24):
     intervals = torch.cat([points[0:1], points[1:] - points[:-1]], dim=0)
     return points, intervals
 
+
 class Encoder(nn.Module):
 
     def __init__(self, channels=128, num_card_layers=2, num_action_layers=2,
@@ -338,6 +339,11 @@ class Actor(nn.Module):
     def __init__(self, channels, use_transformer=False):
         super(Actor, self).__init__()
         c = channels
+        self.state_proj = nn.Sequential(
+            nn.Linear(c * 2, c),
+            nn.ReLU(),
+            nn.Linear(c, c),
+        )
         self.use_transformer = use_transformer
         if use_transformer:
             self.transformer = nn.TransformerEncoderLayer(
@@ -348,7 +354,10 @@ class Actor(nn.Module):
             nn.Linear(c // 4, 1),
         )
 
-    def forward(self, f_actions, mask):
+    def forward(self, f_actions, h_state, mask):
+        f_state = self.state_proj(h_state)
+        # TODO: maybe token concat
+        f_actions = f_actions + f_state.unsqueeze(1)
         if self.use_transformer:
             f_actions = self.transformer(f_actions, src_key_padding_mask=mask)
         logits = self.head(f_actions)[..., 0]
@@ -361,13 +370,15 @@ class PPOAgent(nn.Module):
 
     def __init__(self, channels=128, num_card_layers=2, num_action_layers=2,
                  num_history_action_layers=2, embedding_shape=None, bias=False,
-                 affine=True, a_trans=True):
+                 affine=True, a_trans=True, num_lstm_layers=1):
         super(PPOAgent, self).__init__()
 
         self.encoder = Encoder(
             channels, num_card_layers, num_action_layers, num_history_action_layers, embedding_shape, bias, affine)
 
         c = channels
+        self.lstm = nn.LSTM(c * 2, c * 2, num_lstm_layers)
+
         self.actor = Actor(c, a_trans)
 
         self.critic = nn.Sequential(
@@ -376,21 +387,50 @@ class PPOAgent(nn.Module):
             nn.Linear(c // 2, 1),
         )
 
+        self.init_lstm()
+
+    def init_lstm(self):
+        for name, param in self.lstm.named_parameters():
+            if "bias" in name:
+                nn.init.constant_(param, 0)
+            elif "weight" in name:
+                nn.init.orthogonal_(param, 1.0)
+
     def load_embeddings(self, embeddings):
         self.encoder.load_embeddings(embeddings)
     
     def freeze_embeddings(self):
         self.encoder.freeze_embeddings()
 
-    def get_logit(self, x):
-        f_actions, f_state, mask, valid = self.encoder(x)
-        return self.actor(f_actions, mask)
+    # def get_logit(self, x):
+    #     f_actions, f_state, mask, valid = self.encoder(x)
+    #     return self.actor(f_actions, mask)
 
-    def get_value(self, x):
-        f_actions, f_state, mask, valid = self.encoder(x)
-        return self.critic(f_state)
+    # def get_value(self, x):
+    #     f_actions, f_state, mask, valid = self.encoder(x)
+    #     return self.critic(f_state)
 
-    def forward(self, x):
+    def encode_lstm(self, hidden, lstm_state, done):
+        batch_size = lstm_state[0].shape[1]
+        hidden = hidden.reshape((-1, batch_size, self.lstm.input_size))
+        new_hidden, lstm_state = self.lstm(hidden, lstm_state)
+        # not_done = (~done.reshape((-1, batch_size))).float()
+        # new_hidden = []
+        # for i in range(hidden.shape[0]):
+        #     h, lstm_state = self.lstm(
+        #         hidden[i].unsqueeze(0),
+        #         (
+        #             not_done[i].view(1, -1, 1) * lstm_state[0],
+        #             not_done[i].view(1, -1, 1) * lstm_state[1],
+        #         ),
+        #     )
+        #     new_hidden += [h]
+        # new_hidden = torch.cat(new_hidden)
+        new_hidden = torch.flatten(new_hidden, 0, 1)
+        return new_hidden, lstm_state
+
+    def forward(self, x, lstm_state, done):
         f_actions, f_state, mask, valid = self.encoder(x)
-        logits = self.actor(f_actions, mask)
-        return logits, self.critic(f_state), valid
+        h_state, lstm_state = self.encode_lstm(f_state, lstm_state, done)
+        logits = self.actor(f_actions, h_state, mask)
+        return logits, self.critic(h_state), valid, lstm_state

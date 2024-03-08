@@ -20,7 +20,7 @@ from torch.cuda.amp import GradScaler, autocast
 
 from ygoai.utils import init_ygopro
 from ygoai.rl.utils import RecordEpisodeStatistics
-from ygoai.rl.agent import PPOAgent as Agent
+from ygoai.rl.agent2 import PPOAgent as Agent
 from ygoai.rl.dist import reduce_gradidents, torchrun_setup, fprint
 from ygoai.rl.buffer import create_obs
 
@@ -136,6 +136,8 @@ class Args:
     """the number of iterations (computed in runtime)"""
     world_size: int = 0
     """the number of processes (computed in runtime)"""
+    num_minibatches: int = 0
+    """the number of mini-batches (computed in runtime)"""
 
 
 def main():
@@ -151,6 +153,7 @@ def main():
     args.local_minibatch_size = int(args.minibatch_size // args.world_size)
     args.batch_size = int(args.num_envs * args.num_steps)
     args.num_iterations = args.total_timesteps // args.batch_size
+    args.num_minibatches = args.local_batch_size // args.local_minibatch_size
     args.env_threads = args.env_threads or args.num_envs
     args.torch_threads = args.torch_threads or (int(os.getenv("OMP_NUM_THREADS", "2")) * args.world_size)
 
@@ -240,7 +243,7 @@ def main():
     else:
         embedding_shape = None
     L = args.num_layers
-    agent = Agent(args.num_channels, L, L, 1, embedding_shape).to(device)
+    agent = Agent(args.num_channels, L, L, 2, embedding_shape).to(device)
 
     if args.checkpoint:
         agent.load_state_dict(torch.load(args.checkpoint, map_location=device))
@@ -268,9 +271,9 @@ def main():
         std = (var + eps).sqrt()
         return (x - mean) / std
 
-    def train_step(agent: Agent, scaler, mb_obs, mb_actions, mb_logprobs, mb_advantages, mb_returns, mb_values, mb_learns):
+    def train_step(agent: Agent, scaler, mb_obs, lstm_state, mb_dones, mb_actions, mb_logprobs, mb_advantages, mb_returns, mb_values, mb_learns):
         with autocast(enabled=args.fp16_train):
-            logits, newvalue, valid = agent(mb_obs)
+            logits, newvalue, valid, _ = agent(mb_obs, lstm_state, mb_dones)
             probs = Categorical(logits=logits)
             newlogprob = probs.log_prob(mb_actions)
             entropy = probs.entropy()
@@ -315,18 +318,23 @@ def main():
         scaler.unscale_(optimizer)
         return old_approx_kl, approx_kl, clipfrac, pg_loss, v_loss, entropy_loss
 
-    def predict_step(agent: Agent, next_obs):
+    def predict_step(agent: Agent, next_obs, next_lstm_state, next_done):
         with torch.no_grad():
             with autocast(enabled=args.fp16_eval):
-                logits, value, valid = agent(next_obs)
-        return logits, value
+                logits, value, valid, next_lstm_state = agent(next_obs, next_lstm_state, next_done)
+        return logits, value, next_lstm_state
 
     if args.compile:
         # It seems that using torch.compile twice cause segfault at start, so we use torch.jit.trace here
         # predict_step = torch.compile(predict_step, mode=args.compile)
         obs = create_obs(envs.observation_space, (args.local_num_envs,), device=device)
+        next_done = torch.zeros(args.local_num_envs, device=device, dtype=torch.bool)
+        next_lstm_state = (
+            torch.zeros(agent.lstm.num_layers, args.local_num_envs, agent.lstm.hidden_size, device=device),
+            torch.zeros(agent.lstm.num_layers, args.local_num_envs, agent.lstm.hidden_size, device=device),
+        )
         with torch.no_grad():
-            traced_model = torch.jit.trace(agent, (obs,), check_tolerance=False, check_trace=False)
+            traced_model = torch.jit.trace(agent, (obs, next_lstm_state, next_done), check_tolerance=False, check_trace=False)
 
         train_step = torch.compile(train_step, mode=args.compile)
 
@@ -353,6 +361,11 @@ def main():
     next_to_play_ = info["to_play"]
     next_to_play = to_tensor(next_to_play_)
     next_done = torch.zeros(args.local_num_envs, device=device, dtype=torch.bool)
+    next_lstm_state = (
+        torch.zeros(agent.lstm.num_layers, args.local_num_envs, agent.lstm.hidden_size, device=device),
+        torch.zeros(agent.lstm.num_layers, args.local_num_envs, agent.lstm.hidden_size, device=device),
+    )
+
     ai_player1_ = np.concatenate([
         np.zeros(args.local_num_envs // 2, dtype=np.int64),
         np.ones(args.local_num_envs // 2, dtype=np.int64)
@@ -363,6 +376,7 @@ def main():
     next_value2 = 0
 
     for iteration in range(1, args.num_iterations + 1):
+        initial_lstm_state = (next_lstm_state[0].clone(), next_lstm_state[1].clone())
         # Annealing the rate if instructed to do so.
         if args.anneal_lr:
             frac = 1.0 - (iteration - 1.0) / args.num_iterations
@@ -383,7 +397,7 @@ def main():
             learns[step] = learn
 
             _start = time.time()
-            logits, value = predict_step(traced_model, next_obs)
+            logits, value, next_lstm_state = predict_step(traced_model, next_obs, next_lstm_state, next_done)
             value = value.flatten()
             probs = Categorical(logits=logits)
             action = probs.sample()
@@ -438,8 +452,7 @@ def main():
         _start = time.time()
         # bootstrap value if not done
         with torch.no_grad():
-            # value = agent.get_value(next_obs).reshape(-1)
-            value = traced_model(next_obs)[1].reshape(-1)
+            value = traced_model(next_obs, next_lstm_state, next_done)[1].reshape(-1)
         advantages = torch.zeros_like(rewards).to(device)
         nextvalues1 = torch.where(next_to_play == ai_player1, value, next_value1)
         nextvalues2 = torch.where(next_to_play != ai_player1, value, next_value2)
@@ -535,25 +548,33 @@ def main():
         }
         b_logprobs = logprobs.reshape(-1)
         b_actions = actions.reshape((-1,) + action_shape)
+        b_dones = dones.reshape(-1)
         b_advantages = advantages.reshape(-1)
         b_returns = returns.reshape(-1)
         b_values = values.reshape(-1)
         b_learns = learns.reshape(-1)
 
         # Optimizing the policy and value network
-        b_inds = np.arange(args.local_batch_size)
+        assert args.local_num_envs % args.num_minibatches == 0
+        envsperbatch = args.local_num_envs // args.num_minibatches  # minibatch_size // num_steps
+        envinds = np.arange(args.local_num_envs)
+        flatinds = np.arange(args.local_batch_size).reshape(args.num_steps, args.local_num_envs)
         clipfracs = []
         for epoch in range(args.update_epochs):
-            np.random.shuffle(b_inds)
-            for start in range(0, args.local_batch_size, args.local_minibatch_size):
-                end = start + args.local_minibatch_size
-                mb_inds = b_inds[start:end]
+            np.random.shuffle(envinds)
+            for start in range(0, args.local_num_envs, envsperbatch):
+                end = start + envsperbatch
+                mbenvinds = envinds[start:end]
+                mb_inds = flatinds[:, mbenvinds].ravel()  # be really careful about the index
+
                 mb_obs = {
                     k: v[mb_inds] for k, v in b_obs.items()
                 }
-                old_approx_kl, approx_kl, clipfrac, pg_loss, v_loss, entropy_loss = \
-                    train_step(agent, scaler, mb_obs, b_actions[mb_inds], b_logprobs[mb_inds], b_advantages[mb_inds],
-                            b_returns[mb_inds], b_values[mb_inds], b_learns[mb_inds])
+
+                old_approx_kl, approx_kl, clipfrac, pg_loss, v_loss, entropy_loss = train_step(
+                    agent, scaler, mb_obs, (initial_lstm_state[0][:, mbenvinds], initial_lstm_state[1][:, mbenvinds]),
+                    b_dones[mb_inds], b_actions[mb_inds], b_logprobs[mb_inds], b_advantages[mb_inds],
+                    b_returns[mb_inds], b_values[mb_inds], b_learns[mb_inds])
                 reduce_gradidents(optim_params, args.world_size)
                 nn.utils.clip_grad_norm_(optim_params, args.max_grad_norm)
                 scaler.step(optimizer)
@@ -606,16 +627,23 @@ def main():
             episode_rewards = []
             eval_win_rates = []
             e_obs = eval_envs.reset()[0]
+            e_dones_ = np.zeros(local_eval_num_envs, dtype=np.bool_)
+            e_next_lstm_state = (
+                torch.zeros(agent.lstm.num_layers, local_eval_num_envs, agent.lstm.hidden_size, device=device),
+                torch.zeros(agent.lstm.num_layers, local_eval_num_envs, agent.lstm.hidden_size, device=device),
+            )
+
             while True:
                 e_obs = to_tensor(e_obs, dtype=torch.uint8)
-                e_logits = predict_step(traced_model, e_obs)[0]
+                e_dones = to_tensor(e_dones_, dtype=torch.bool)
+                e_logits, _, e_next_lstm_state = predict_step(traced_model, e_obs, e_next_lstm_state, e_dones)
                 e_probs = torch.softmax(e_logits, dim=-1)
                 e_probs = e_probs.cpu().numpy()
                 e_actions = e_probs.argmax(axis=1)
 
-                e_obs, e_rewards, e_dones, e_info = eval_envs.step(e_actions)
+                e_obs, e_rewards, e_dones_, e_info = eval_envs.step(e_actions)
 
-                for idx, d in enumerate(e_dones):
+                for idx, d in enumerate(e_dones_):
                     if d:
                         episode_length = e_info['l'][idx]
                         episode_reward = e_info['r'][idx]

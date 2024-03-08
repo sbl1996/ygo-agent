@@ -2,6 +2,8 @@ import re
 import numpy as np
 import gymnasium as gym
 
+import optree
+import torch
 
 class RecordEpisodeStatistics(gym.Wrapper):
     def __init__(self, env):
@@ -84,3 +86,21 @@ class Elo:
     def expect_result(self, p0, p1):
         exp = (p0 - p1) / 400.0
         return 1 / ((10.0 ** (exp)) + 1)
+    
+
+def masked_mean(x, valid):
+    x = x.masked_fill(~valid, 0)
+    return x.sum() / valid.float().sum()
+
+
+def masked_normalize(x, valid, eps=1e-8):
+    x = x.masked_fill(~valid, 0)
+    n = valid.float().sum()
+    mean = x.sum() / n
+    var = ((x - mean) ** 2).sum() / n
+    std = (var + eps).sqrt()
+    return (x - mean) / std
+
+
+def to_tensor(x, device, dtype=torch.float32):
+    return optree.tree_map(lambda x: torch.from_numpy(x).to(device=device, dtype=dtype, non_blocking=True), x)
