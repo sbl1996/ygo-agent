@@ -60,12 +60,13 @@ class Encoder(nn.Module):
         self.id_norm = nn.LayerNorm(c // 4, elementwise_affine=False)
 
         self.owner_embed = nn.Embedding(2, c // 16)
-        self.position_embed = nn.Embedding(9, c // 16 * 2)
+        self.position_embed = nn.Embedding(9, c // 16)
         self.overley_embed = nn.Embedding(2, c // 16)
         self.attribute_embed = nn.Embedding(8, c // 16)
         self.race_embed = nn.Embedding(27, c // 16)
         self.level_embed = nn.Embedding(14, c // 16)
         self.counter_embed = nn.Embedding(16, c // 16)
+        self.negated_embed = nn.Embedding(3, c // 16)
         self.type_fc_emb = linear(25, c // 16 * 2)
         self.atk_fc_emb = linear(c_num, c // 16)
         self.def_fc_emb = linear(c_num, c // 16)
@@ -224,7 +225,8 @@ class Encoder(nn.Module):
         x_race = self.race_embed(x1[:, :, 6])
         x_level = self.level_embed(x1[:, :, 7])
         x_counter = self.counter_embed(x1[:, :, 8])
-        return x_owner, x_position, x_overley, x_attribute, x_race, x_level, x_counter
+        x_negated = self.negated_embed(x1[:, :, 9])
+        return x_owner, x_position, x_overley, x_attribute, x_race, x_level, x_counter, x_negated
     
     def encode_card_feat2(self, x2):
         x_atk = self.num_transform(x2[:, :, 0:2])
