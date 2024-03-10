@@ -108,7 +108,6 @@ def bootstrap_value_self(values, rewards, dones, learns, nextvalues, next_done, 
 
 
 def bootstrap_value_selfplay(values, rewards, dones, learns, nextvalues1, nextvalues2, next_done, gamma, gae_lambda):
-    # TODO: drop epsilon steps for estimated nextvalues
     num_steps = rewards.size(0)
     advantages = torch.zeros_like(rewards)
     # TODO: optimize this

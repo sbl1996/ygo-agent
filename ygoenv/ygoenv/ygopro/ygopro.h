@@ -365,8 +365,7 @@ inline std::string ls_to_spec(uint8_t loc, uint8_t seq, uint8_t pos) {
   return spec;
 }
 
-inline std::string ls_to_spec(uint8_t loc, uint8_t seq, uint8_t pos,
-                              bool opponent) {
+inline std::string ls_to_spec(uint8_t loc, uint8_t seq, uint8_t pos, bool opponent) {
   std::string spec = ls_to_spec(loc, seq, pos);
   if (opponent) {
     spec.insert(0, 1, 'o');
@@ -1471,6 +1470,7 @@ public:
     int init_lp = 8000;
     int startcount = 5;
     int drawcount = 1;
+
     for (PlayerId i = 0; i < 2; i++) {
       if (players_[i] != nullptr) {
         delete players_[i];
@@ -1641,10 +1641,12 @@ public:
 
   void Step(const Action &action) override {
     // clock_t start = clock();
+    // fmt::println("Step");
 
     int idx = action["action"_];
     callback_(idx);
-    update_history_actions(to_play_, idx);
+    // update_history_actions(to_play_, idx);
+    // fmt::println("update_history_actions");
 
     PlayerId player = to_play_;
 
@@ -2153,6 +2155,10 @@ private:
           ReplayWriteInt8(1);
           fwrite(buf, 1, 1, fp_);
           break;
+        case MSG_SELECT_COUNTER:
+          ReplayWriteInt8(2);
+          fwrite(buf, 2, 1, fp_);
+          break;
         case MSG_SELECT_PLACE:
         case MSG_SELECT_DISFIELD:
           ReplayWriteInt8(3);
@@ -2183,10 +2189,13 @@ private:
       state["obs:global_"_][22] = uint8_t(1);
       return;
     }
+    // fmt::println("writestate");
 
     auto [spec2index, loc_n_cards] = _set_obs_cards(state["obs:cards_"_], to_play_);
+    // fmt::println("_set_obs_cards");
 
-    _set_obs_global(state["obs:global_"_], to_play_, loc_n_cards);
+    // _set_obs_global(state["obs:global_"_], to_play_, loc_n_cards);
+    // fmt::println("_set_obs_global");
 
     // we can't shuffle because idx must be stable in callback
     if (n_options > max_options()) {
@@ -2198,10 +2207,12 @@ private:
     //   fmt::println("{} {}", key, val);
     // }
 
-    _set_obs_actions(state["obs:actions_"_], spec2index, msg_, options_);
+    // _set_obs_actions(state["obs:actions_"_], spec2index, msg_, options_);
+    // fmt::println("_set_obs_actions");
 
     n_options = options_.size();
     state["info:num_options"_] = n_options;
+    return;
 
     // update h_card_ids from state
     auto &h_card_ids = to_play_ == 0 ? h_card_ids_0_ : h_card_ids_1_;
@@ -2222,6 +2233,7 @@ private:
       }
       h_card_ids[i] = card_ids;
     }
+    // fmt::println("update h_card_ids");
 
     // write history actions
 
@@ -2235,6 +2247,7 @@ private:
                                     n_action_feats * n1);
     state["obs:h_actions_"_][n1].Assign((uint8_t *)history_actions.Data(),
                                         n_action_feats * ha_p);
+    // fmt::println("write history actions");
   }
 
   void show_decision(int idx) {
@@ -2307,8 +2320,8 @@ private:
         if ((play_mode_ == kSelfPlay) || (to_play_ == ai_player_)) {
           if (options_.size() == 1) {
             callback_(0);
-            update_h_card_ids(to_play_, 0);
-            update_history_actions(to_play_, 0);
+            // update_h_card_ids(to_play_, 0);
+            // update_history_actions(to_play_, 0);
             if (verbose_) {
               show_decision(0);
             }
@@ -2488,6 +2501,7 @@ private:
       }
       cards.push_back(c);
     }
+    fmt::println("qdp: {}, bl: {}, n: {}", qdp_, bl, cards.size());
     return cards;
   }
 
@@ -2513,8 +2527,7 @@ private:
     return cards;
   }
 
-  std::vector<IdleCardSpec> read_cardlist_spec(bool extra = false,
-                                               bool extra8 = false) {
+  std::vector<IdleCardSpec> read_cardlist_spec(PlayerId player, bool extra = false, bool extra8 = false) {
     std::vector<IdleCardSpec> card_specs;
     auto count = read_u8();
     card_specs.reserve(count);
@@ -2531,7 +2544,7 @@ private:
           data = read_u32();
         }
       }
-      card_specs.push_back({code, ls_to_spec(loc, seq, 0), data});
+      card_specs.push_back({code, ls_to_spec(loc, seq, 0, player != controller), data});
     }
     return card_specs;
   }
@@ -2988,6 +3001,7 @@ private:
         if (verbose_) {
           cards.push_back(get_card(c, loc, seq));
         }
+        // TODO: check if this is correct
         revealed_.push_back(ls_to_spec(loc, seq, 0, c == player));
       }
       if (!verbose_) {
@@ -3406,8 +3420,8 @@ private:
       throw std::runtime_error("Retry");
     } else if (msg_ == MSG_SELECT_BATTLECMD) {
       auto player = read_u8();
-      auto activatable = read_cardlist_spec(true);
-      auto attackable = read_cardlist_spec(true, true);
+      auto activatable = read_cardlist_spec(player, true);
+      auto attackable = read_cardlist_spec(player, true, true);
       bool to_m2 = read_u8();
       bool to_ep = read_u8();
 
@@ -4122,12 +4136,12 @@ private:
       };
     } else if (msg_ == MSG_SELECT_IDLECMD) {
       int32_t player = read_u8();
-      auto summonable_ = read_cardlist_spec();
-      auto spsummon_ = read_cardlist_spec();
-      auto repos_ = read_cardlist_spec();
-      auto idle_mset_ = read_cardlist_spec();
-      auto idle_set_ = read_cardlist_spec();
-      auto idle_activate_ = read_cardlist_spec(true);
+      auto summonable_ = read_cardlist_spec(player);
+      auto spsummon_ = read_cardlist_spec(player);
+      auto repos_ = read_cardlist_spec(player);
+      auto idle_mset_ = read_cardlist_spec(player);
+      auto idle_set_ = read_cardlist_spec(player);
+      auto idle_activate_ = read_cardlist_spec(player, true);
       bool to_bp_ = read_u8();
       bool to_ep_ = read_u8();
       read_u8(); // can_shuffle
@@ -4332,6 +4346,35 @@ private:
         resp_buf_[2] = seq;
         YGO_SetResponseb(pduel_, resp_buf_);
       };
+    } else if (msg_ == MSG_SELECT_COUNTER) {
+      auto player = read_u8();
+      auto counter_type = read_u16();
+      auto counter_count = read_u16();
+      int count = read_u8();
+      if (count != 1) {
+        throw std::runtime_error("Select counter count " +
+                                 std::to_string(count) + " not implemented");
+      }
+      auto pl = players_[player];
+      if (verbose_) {
+        pl->notify(fmt::format("Type new {} for {} card(s), separated by spaces.", "UNKNOWN_COUNTER", count));
+      }
+      for (int i = 0; i < count; ++i) {
+        auto code = read_u32();
+        auto controller = read_u8();
+        auto loc = read_u8();
+        auto seq = read_u8();
+        auto counter = read_u16();
+        if (verbose_) {
+          pl->notify(c_get_card(code).name_ + ": " + std::to_string(counter));
+        }
+        // auto spec = ls_to_spec(loc, seq, 0, controller != player);
+        // options_.push_back(spec);
+      }
+      // TODO: implement action
+      uint16_t resp = counter_count & 0xffff;
+      memcpy(resp_buf_, &resp, 2);
+      YGO_SetResponseb(pduel_, resp_buf_);
     } else if (msg_ == MSG_ANNOUNCE_NUMBER) {
       auto player = read_u8();
       int count = read_u8();
@@ -4448,6 +4491,11 @@ private:
     } else {
       show_deck(0);
       show_deck(1);
+      // print byte by byte
+      for (int i = 0; i < dp_; ++i) {
+        fmt::print("{:02x} ", data_[i]);
+      }
+      fmt::print("\n");
       throw std::runtime_error(
         fmt::format("Unknown message {}, length {}, dp {}",
         msg_to_string(msg_), dl_, dp_));

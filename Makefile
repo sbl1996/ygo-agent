@@ -1,4 +1,4 @@
-SCRIPTS_REPO := "https://github.com/Fluorohydride/ygopro-scripts.git"
+SCRIPTS_REPO := "https://github.com/mycard/ygopro-scripts.git"
 SCRIPTS_DIR := "../ygopro-scripts"
 DATABASE_REPO := "https://github.com/mycard/ygopro-database/raw/master/locales"
 LOCALES := en zh

@@ -5,7 +5,6 @@ from collections import deque
 from dataclasses import dataclass
 from typing import Literal, Optional
 
-
 import ygoenv
 import numpy as np
 import tyro
@@ -22,7 +21,7 @@ from ygoai.rl.utils import RecordEpisodeStatistics, to_tensor, load_embeddings
 from ygoai.rl.agent import PPOAgent as Agent
 from ygoai.rl.dist import reduce_gradidents, torchrun_setup, fprint
 from ygoai.rl.buffer import create_obs
-from ygoai.rl.ppo import bootstrap_value_self
+from ygoai.rl.ppo import bootstrap_value_selfplay
 from ygoai.rl.eval import evaluate
 
 
@@ -78,11 +77,6 @@ class Args:
     """the discount factor gamma"""
     gae_lambda: float = 0.95
     """the lambda for the general advantage estimation"""
-
-    update_win_rate: float = 0.55
-    """the required win rate to update the agent"""
-    update_return: float = 0.1
-    """the required return to update the agent"""
 
     minibatch_size: int = 256
     """the mini-batch size"""
@@ -265,28 +259,21 @@ def main():
 
     scaler = GradScaler(enabled=args.fp16_train, init_scale=2 ** 8)
 
-    agent_t = Agent(args.num_channels, L, L, 2, embedding_shape).to(device)
-    agent_t.eval()
-    agent_t.load_state_dict(agent.state_dict())
-
-    def predict_step(agent: Agent, agent_t: Agent, next_obs, learn):
+    def predict_step(agent: Agent, next_obs):
         with torch.no_grad():
             with autocast(enabled=args.fp16_eval):
                 logits, value, valid = agent(next_obs)
-                logits_t, value_t, valid = agent_t(next_obs)
-        logits = torch.where(learn[:, None], logits, logits_t)
-        value = torch.where(learn[:, None], value, value_t)
         return logits, value
 
     from ygoai.rl.ppo import train_step
     if args.compile:
         # It seems that using torch.compile twice cause segfault at start, so we use torch.jit.trace here
         # predict_step = torch.compile(predict_step, mode=args.compile)
-        agent = torch.compile(agent, mode=args.compile)
-        example_obs = create_obs(envs.observation_space, (args.local_num_envs,), device=device)
+        obs = create_obs(envs.observation_space, (args.local_num_envs,), device=device)
         with torch.no_grad():
-            traced_model_t = torch.jit.trace(agent_t, (example_obs,), check_tolerance=False, check_trace=False)
-        traced_model_t = torch.jit.optimize_for_inference(traced_model_t)
+            traced_model = torch.jit.trace(agent, (obs,), check_tolerance=False, check_trace=False)
+
+        train_step = torch.compile(train_step, mode=args.compile)
 
     # ALGO Logic: Storage setup
     obs = create_obs(obs_space, (args.num_steps, args.local_num_envs), device)
@@ -298,7 +285,6 @@ def main():
     learns = torch.zeros((args.num_steps, args.local_num_envs), dtype=torch.bool).to(device)
     avg_ep_returns = deque(maxlen=1000)
     avg_win_rates = deque(maxlen=1000)
-    version = 0
 
     # TRY NOT TO MODIFY: start the game
     global_step = 0
@@ -315,7 +301,7 @@ def main():
     ])
     np.random.shuffle(ai_player1_)
     ai_player1 = to_tensor(ai_player1_, device, dtype=next_to_play.dtype)
-    next_value = 0
+    next_value1 = next_value2 = 0
 
     for iteration in range(1, args.num_iterations + 1):
         # Annealing the rate if instructed to do so.
@@ -323,8 +309,6 @@ def main():
             frac = 1.0 - (iteration - 1.0) / args.num_iterations
             lrnow = frac * args.learning_rate
             optimizer.param_groups[0]["lr"] = lrnow
-
-        agent.eval()
 
         model_time = 0
         env_time = 0
@@ -339,7 +323,7 @@ def main():
             learns[step] = learn
 
             _start = time.time()
-            logits, value = predict_step(agent, traced_model_t, next_obs, learn)
+            logits, value = predict_step(traced_model, next_obs)
             value = value.flatten()
             probs = Categorical(logits=logits)
             action = probs.sample()
@@ -352,7 +336,8 @@ def main():
             model_time += time.time() - _start
 
             next_nonterminal = 1 - next_done.float()
-            next_value = torch.where(learn, value, next_value) * next_nonterminal
+            next_value1 = torch.where(learn, value, next_value1) * next_nonterminal
+            next_value2 = torch.where(learn, next_value2, value) * next_nonterminal
 
             _start = time.time()
             to_play = next_to_play_
@@ -393,16 +378,14 @@ def main():
         _start = time.time()
         # bootstrap value if not done
         with torch.no_grad():
-            value = agent(next_obs)[1].reshape(-1)
-            value_t = traced_model_t(next_obs)[1].reshape(-1)
-            value = torch.where(next_to_play == ai_player1, value, value_t)
-        nextvalues = torch.where(next_to_play == ai_player1, value, next_value)
-        advantages = bootstrap_value_self(
-            values, rewards, dones, learns, nextvalues, next_done, args.gamma, args.gae_lambda)
+            value = traced_model(next_obs)[1].reshape(-1)
+        nextvalues1 = torch.where(next_to_play == ai_player1, value, next_value1)
+        nextvalues2 = torch.where(next_to_play != ai_player1, value, next_value2)
+        advantages = bootstrap_value_selfplay(
+            values, rewards, dones, learns, nextvalues1, nextvalues2, next_done, args.gamma, args.gae_lambda)
         returns = advantages + values
         bootstrap_time = time.time() - _start
 
-        agent.train()
         _start = time.time()
         # flatten the batch
         b_obs = {
@@ -475,31 +458,11 @@ def main():
             if rank == 0:
                 writer.add_scalar("charts/SPS", SPS, global_step)
 
-        if rank == 0:
-            should_update = len(avg_win_rates) == 1000 and np.mean(avg_win_rates) > args.update_win_rate and np.mean(avg_ep_returns) > args.update_return
-            should_update = torch.tensor(int(should_update), dtype=torch.int64, device=device)
-        else:
-            should_update = torch.zeros((), dtype=torch.int64, device=device)
-        if args.world_size > 1:
-            dist.all_reduce(should_update, op=dist.ReduceOp.SUM)
-        should_update = should_update.item() > 0
-        if should_update:
-            agent_t.load_state_dict(agent.state_dict())
-            with torch.no_grad():
-                traced_model_t = torch.jit.trace(agent_t, (example_obs,), check_tolerance=False, check_trace=False)
-            traced_model_t = torch.jit.optimize_for_inference(traced_model_t)
-
-            version += 1
-            if rank == 0:
-                torch.save(agent.state_dict(), os.path.join(ckpt_dir, f"agent_v{version}.pt"))
-                print(f"Updating agent at global_step={global_step} with win_rate={np.mean(avg_win_rates)}")
-                avg_win_rates.clear()
-                avg_ep_returns.clear()
-
+        if iteration % args.eval_interval == 0:
+            # Eval with rule-based policy
             _start = time.time()
-            agent.eval()
             eval_return = evaluate(
-                eval_envs, agent, local_eval_episodes, device, args.fp16_eval)
+                eval_envs, traced_model, local_eval_episodes, device, args.fp16_eval)[0]
             eval_stats = torch.tensor(eval_return, dtype=torch.float32, device=device)
 
             # sync the statistics
