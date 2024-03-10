@@ -12,7 +12,7 @@ YGO Agent is a project to create a Yu-Gi-Oh! AI using deep learning (LLMs, RL). 
 ## Building
 
 ### prerequisites
-- gcc 10,0 or later (or clang 11.0 or later)
+- gcc 10+ or clang 11+
 - [xmake](https://xmake.io/#/getting_started)
 - PyTorch 2.0 or later with cuda support
 
