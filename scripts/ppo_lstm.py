@@ -19,7 +19,7 @@ import torch.distributed as dist
 from torch.cuda.amp import GradScaler, autocast
 
 from ygoai.utils import init_ygopro
-from ygoai.rl.utils import RecordEpisodeStatistics
+from ygoai.rl.utils import RecordEpisodeStatistics, load_embeddings
 from ygoai.rl.agent2 import PPOAgent as Agent
 from ygoai.rl.dist import reduce_gradidents, torchrun_setup, fprint
 from ygoai.rl.buffer import create_obs
@@ -238,7 +238,7 @@ def main():
     eval_envs = RecordEpisodeStatistics(eval_envs)
 
     if args.embedding_file:
-        embeddings = np.load(args.embedding_file)
+        embeddings = load_embeddings(args.embedding_file, args.code_list_file)
         embedding_shape = embeddings.shape
     else:
         embedding_shape = None

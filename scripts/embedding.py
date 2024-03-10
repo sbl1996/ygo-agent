@@ -3,6 +3,7 @@ import time
 from dataclasses import dataclass
 from typing import Optional
 
+import pickle
 import numpy as np
 
 import voyageai
@@ -12,14 +13,15 @@ import tyro
 from ygoai.embed import read_cards
 from ygoai.utils import load_deck
 
+
 @dataclass
 class Args:
     deck_dir: str = "../assets/deck"
     """the directory of ydk files"""
     code_list_file: str = "code_list.txt"
     """the file containing the list of card codes"""
-    embeddings_file: Optional[str] = "embeddings.npy"
-    """the npz file containing the embeddings of the cards"""
+    embeddings_file: Optional[str] = None
+    """the pickle file containing the embeddings of the cards"""
     cards_db: str = "../assets/locale/en/cards.cdb"
     """the cards database file"""
     batch_size: int = 64
@@ -76,18 +78,7 @@ if __name__ == "__main__":
     with open(code_list_file, "r") as f:
         code_list = f.readlines()
     code_list = [int(code.strip()) for code in code_list]
-    print(f"The database contains {len(code_list)} cards.")
-
-    if embeddings_file is not None:
-        # read embeddings
-        if not os.path.exists(embeddings_file):
-            sample_embedding = get_embeddings(["test"])[0]
-            all_embeddings = np.zeros((0, len(sample_embedding)), dtype=np.float32)
-        else:
-            all_embeddings = np.load(embeddings_file)
-        print("Embedding dim:", all_embeddings.shape[1])
-
-        assert len(all_embeddings) == len(code_list), f"The number of embeddings({len(all_embeddings)}) does not match the number of cards."
+    print(f"The code list contains {len(code_list)} cards.")
 
     all_codes = set(code_list)
 
@@ -97,20 +88,32 @@ if __name__ == "__main__":
             new_codes.append(code)
     
     if new_codes == []:
-        print("No new cards have been added to the database.")
-        exit()
+        print("No new cards have been added to the code list.")
+    else:
+        # update code_list
+        code_list += new_codes
 
-    new_texts = read_texts(cards_db, new_codes)
-    print(new_texts)
+        with open(code_list_file, "w") as f:
+            f.write("\n".join(map(str, code_list)) + "\n")
+
+        print(f"{len(new_codes)} new cards have been added to the code list.")
+
     if embeddings_file is not None:
+        if not os.path.exists(embeddings_file):
+            all_embeddings = {}
+        else:
+            all_embeddings = pickle.load(open(embeddings_file, "rb"))
+
+        codes_not_in_embeddings = [code for code in code_list if code not in all_embeddings]
+        if codes_not_in_embeddings == []:
+            print("All cards have embeddings.")
+            exit()
+        print(f"{len(codes_not_in_embeddings)} cards do not have embeddings.")
+        new_texts = read_texts(cards_db, codes_not_in_embeddings)
+        print(new_texts)
         embeddings = get_embeddings(new_texts, args.batch_size, args.wait_time, verbose=True)
-        all_embeddings = np.concatenate([all_embeddings, np.array(embeddings)], axis=0)
-        np.save(embeddings_file, all_embeddings)
-
-    # update code_list
-    code_list += new_codes
-
-    with open(code_list_file, "w") as f:
-        f.write("\n".join(map(str, code_list)) + "\n")
-
-    print(f"{len(new_codes)} new cards have been added to the database.")
+        embeddings = np.array(embeddings, dtype=np.float32)
+        for code, embedding in zip(codes_not_in_embeddings, embeddings):
+            all_embeddings[code] = embedding
+        print(f"Embeddings of {len(codes_not_in_embeddings)} cards have been added.")
+        pickle.dump(all_embeddings, open(embeddings_file, "wb"))

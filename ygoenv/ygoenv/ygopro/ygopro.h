@@ -459,6 +459,11 @@ static std::tuple<std::vector<uint32>, std::vector<uint32>, std::vector<uint32>>
       }
     }
 
+    if (main_deck.size() < 40) {
+      std::string err = fmt::format("Main deck must contain at least 40 cards, found: {}, file: {}", main_deck.size(), fp);
+      throw std::runtime_error(err);
+    }
+
     // Read the extra deck
     if (found_extra) {
       while (std::getline(file, line)) {
@@ -801,6 +806,7 @@ protected:
 
   uint32_t data_ = 0;
 
+  uint32_t status_ = 0;
   PlayerId controler_ = 0;
   uint32_t location_ = 0;
   uint32_t sequence_ = 0;
@@ -1236,7 +1242,7 @@ public:
   static decltype(auto) StateSpec(const Config &conf) {
     int n_action_feats = 10 + conf["max_multi_select"_] * 2;
     return MakeDict(
-        "obs:cards_"_.Bind(Spec<uint8_t>({conf["max_cards"_] * 2, 40})),
+        "obs:cards_"_.Bind(Spec<uint8_t>({conf["max_cards"_] * 2, 41})),
         "obs:global_"_.Bind(Spec<uint8_t>({23})),
         "obs:actions_"_.Bind(
             Spec<uint8_t>({conf["max_options"_], n_action_feats})),
@@ -1803,17 +1809,18 @@ private:
       f_cards(offset, 8) = race2id.at(c.race_);
       f_cards(offset, 9) = c.level_;
       f_cards(offset, 10) = std::min(c.counter_, static_cast<uint32_t>(15));
+      f_cards(offset, 11) = static_cast<uint8_t>((c.status_ & (STATUS_DISABLED | STATUS_FORBIDDEN)) != 0);
       auto [atk1, atk2] = float_transform(c.attack_);
-      f_cards(offset, 11) = atk1;
-      f_cards(offset, 12) = atk2;
+      f_cards(offset, 12) = atk1;
+      f_cards(offset, 13) = atk2;
 
       auto [def1, def2] = float_transform(c.defense_);
-      f_cards(offset, 13) = def1;
-      f_cards(offset, 14) = def2;
+      f_cards(offset, 14) = def1;
+      f_cards(offset, 15) = def2;
 
       auto type_ids = type_to_ids(c.type_);
       for (int j = 0; j < type_ids.size(); ++j) {
-        f_cards(offset, 15 + j) = type_ids[j];
+        f_cards(offset, 16 + j) = type_ids[j];
       }
     }
   }
@@ -2402,8 +2409,8 @@ private:
   std::vector<Card> get_cards_in_location(PlayerId player, uint8_t loc) {
     int32_t flags = QUERY_CODE | QUERY_POSITION | QUERY_LEVEL | QUERY_RANK |
                     QUERY_ATTACK | QUERY_DEFENSE | QUERY_EQUIP_CARD |
-                    QUERY_OVERLAY_CARD | QUERY_COUNTERS | QUERY_LSCALE |
-                    QUERY_RSCALE | QUERY_LINK;
+                    QUERY_OVERLAY_CARD | QUERY_COUNTERS | QUERY_STATUS |
+                    QUERY_LSCALE | QUERY_RSCALE | QUERY_LINK;
     int32_t bl = YGO_QueryFieldCard(pduel_, player, loc, flags, query_buf_);
     qdp_ = 0;
     std::vector<Card> cards;
@@ -2467,6 +2474,7 @@ private:
         }
       }
 
+      c.status_ = q_read_u32();
       c.lscale_ = q_read_u32();
       c.rscale_ = q_read_u32();
 
@@ -2931,7 +2939,43 @@ private:
           p->notify(fmt::format("{}: {}", cards[i].get_spec(pl), cards[i].name_));
         }
       }
+    } else if (msg_ == MSG_PLAYER_HINT) {
+      if (!verbose_) {
+        dp_ = dl_;
+        return;
+      }
+      dp_ += 6;
+      // TODO: implement output
+    } else if (msg_ == MSG_CARD_TARGET) {
+      if (!verbose_) {
+        dp_ = dl_;
+        return;
+      }
+      auto c1 = read_u8();
+      auto l1 = read_u8();
+      auto s1 = read_u8();
+      read_u8();
+      auto c2 = read_u8();
+      auto l2 = read_u8();
+      auto s2 = read_u8();
+      read_u8();
 
+      Card card1 = get_card(c1, l1, s1);
+      Card card2 = get_card(c2, l2, s2);
+      for (PlayerId pl = 0; pl < 2; pl++) {
+        auto p = players_[pl];
+        auto spec1 = card1.get_spec(pl);
+        auto spec2 = card2.get_spec(pl);
+        auto c1name = card1.name_;
+        auto c2name = card2.name_;
+        if ((card1.controler_ != pl) && (card1.position_ & POS_FACEDOWN)) {
+          c1name = position_to_string(card1.position_) + " card";
+        }
+        if ((card2.controler_ != pl) && (card2.position_ & POS_FACEDOWN)) {
+          c2name = position_to_string(card2.position_) + " card";
+        }
+        p->notify(fmt::format(" {} ({}) targets {} ({})", spec1, c1name, spec2, c2name));
+      }
     } else if (msg_ == MSG_CONFIRM_CARDS) {
       auto player = read_u8();
       auto size = read_u8();
@@ -3686,7 +3730,7 @@ private:
       auto must_select_size = read_u8();
 
       if (mode == 0) {
-        if (must_select_size != 1) {
+        if (must_select_size > 2) {
           throw std::runtime_error(
               " must select size: " + std::to_string(must_select_size) +
               " not implemented for MSG_SELECT_SUM");
@@ -3704,7 +3748,7 @@ private:
       must_select_params.reserve(must_select_size);
       must_select_specs.reserve(must_select_size);
 
-      int expected;
+      int expected = val;
       if (verbose_) {
         std::vector<Card> must_select;
         must_select.reserve(must_select_size);
@@ -3717,8 +3761,8 @@ private:
           Card card = get_card(controller, loc, seq);
           must_select.push_back(card);
           must_select_params.push_back(param);
+          expected -= (param & 0xff);
         }
-        expected = int(val) - (must_select_params[0] & 0xff);
         auto pl = players_[player];
         pl->notify("Select cards with a total value of " +
                    std::to_string(expected) + ", seperated by spaces.");
@@ -3739,8 +3783,8 @@ private:
           auto spec = ls_to_spec(loc, seq, 0, controller != player);
           must_select_specs.push_back(spec);
           must_select_params.push_back(param);
+          expected -= (param & 0xff);
         }
-        expected = int(val) - (must_select_params[0] & 0xff);
       }
 
       uint8_t select_size = read_u8();
