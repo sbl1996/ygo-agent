@@ -9,6 +9,21 @@ YGO Agent is a project to create a Yu-Gi-Oh! AI using deep learning (LLMs, RL). 
 `ygoai` is a set of AI agents for playing Yu-Gi-Oh! It aims to achieve superhuman performance like AlphaGo and AlphaZero, with or without human knowledge. Currently, we focus on using reinforcement learning to train the agents.
 
 
+## Building
+
+```bash
+git clone https://github.com/sbl1996/ygo-agent.git
+cd ygo-agent
+git checkout eval_with_ptj  # checkout to the stable branch
+xmake f -y
+make
+
+# Check the installation
+cd scripts
+python -u eval.py --env-id "YGOPro-v0" --deck ../assets/deck/  --num_episodes 32 --strategy random  --lang chinese --num_envs 16
+```
+
+
 ## Usage
 
 ### Obtain a trained agent
