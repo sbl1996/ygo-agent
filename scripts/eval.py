@@ -142,50 +142,53 @@ if __name__ == "__main__":
     envs = RecordEpisodeStatistics(envs)
 
     if args.agent:
-        # count lines of code_list
-        embedding_shape = args.num_embeddings
-        if embedding_shape is None:
-            with open(args.code_list_file, "r") as f:
-                code_list = f.readlines()
-                embedding_shape = len(code_list)
-        L = args.num_layers
-        agent = Agent(args.num_channels, L, L, 2, embedding_shape).to(device)
-        # agent = agent.eval()
-        if args.checkpoint:
-            state_dict = torch.load(args.checkpoint, map_location=device)
-            if not args.compile:
-                prefix = "_orig_mod."
-                state_dict = {k[len(prefix):] if k.startswith(prefix) else k: v for k, v in state_dict.items()}
-            print(agent.load_state_dict(state_dict))
+        if args.checkpoint.endswith(".ptj"):
+            agent = torch.jit.load(args.checkpoint)
+        else:
+            # count lines of code_list
+            embedding_shape = args.num_embeddings
+            if embedding_shape is None:
+                with open(args.code_list_file, "r") as f:
+                    code_list = f.readlines()
+                    embedding_shape = len(code_list)
+            L = args.num_layers
+            agent = Agent(args.num_channels, L, L, 2, embedding_shape).to(device)
+            # agent = agent.eval()
+            if args.checkpoint:
+                state_dict = torch.load(args.checkpoint, map_location=device)
+                if not args.compile:
+                    prefix = "_orig_mod."
+                    state_dict = {k[len(prefix):] if k.startswith(prefix) else k: v for k, v in state_dict.items()}
+                print(agent.load_state_dict(state_dict))
 
-        if args.compile:
-            if args.convert:
-                # Don't support dynamic shapes and very slow inference
-                raise NotImplementedError
-                # obs = create_obs(envs.observation_space, (num_envs,), device=device)
-                # dynamic_shapes = {"x": {}}
-                # # batch_dim = torch.export.Dim("batch", min=1, max=64)
-                # batch_dim = None
-                # for k, v in obs.items():
-                #     dynamic_shapes["x"][k] = {0: batch_dim}
-                # program = torch.export.export(
-                #     agent, (obs,),
-                #     dynamic_shapes=dynamic_shapes,
-                # )
-                # torch.export.save(program, args.checkpoint + "2")
-                # exit(0)
-            agent = torch.compile(agent, mode='reduce-overhead')
-        elif args.optimize:
-            obs = create_obs(envs.observation_space, (num_envs,), device=device)
-            def optimize_for_inference(agent):
-                with torch.no_grad():
-                    traced_model = torch.jit.trace(agent, (obs,), check_tolerance=False, check_trace=False)
-                    return torch.jit.optimize_for_inference(traced_model)
-            agent = optimize_for_inference(agent)
-            if args.convert:
-                torch.jit.save(agent, args.checkpoint + "j")
-                print(f"Optimized model saved to {args.checkpoint}j")
-                exit(0)
+            if args.compile:
+                if args.convert:
+                    # Don't support dynamic shapes and very slow inference
+                    raise NotImplementedError
+                    # obs = create_obs(envs.observation_space, (num_envs,), device=device)
+                    # dynamic_shapes = {"x": {}}
+                    # # batch_dim = torch.export.Dim("batch", min=1, max=64)
+                    # batch_dim = None
+                    # for k, v in obs.items():
+                    #     dynamic_shapes["x"][k] = {0: batch_dim}
+                    # program = torch.export.export(
+                    #     agent, (obs,),
+                    #     dynamic_shapes=dynamic_shapes,
+                    # )
+                    # torch.export.save(program, args.checkpoint + "2")
+                    # exit(0)
+                agent = torch.compile(agent, mode='reduce-overhead')
+            elif args.optimize:
+                obs = create_obs(envs.observation_space, (num_envs,), device=device)
+                def optimize_for_inference(agent):
+                    with torch.no_grad():
+                        traced_model = torch.jit.trace(agent, (obs,), check_tolerance=False, check_trace=False)
+                        return torch.jit.optimize_for_inference(traced_model)
+                agent = optimize_for_inference(agent)
+                if args.convert:
+                    torch.jit.save(agent, args.checkpoint + "j")
+                    print(f"Optimized model saved to {args.checkpoint}j")
+                    exit(0)
 
     obs, infos = envs.reset()
     next_to_play = infos['to_play']
