@@ -30,7 +30,4 @@ def batch_expand(arg0: int, arg1: numpy.ndarray[bool], arg2: numpy.ndarray[numpy
 def batch_traverse(arg0: Roots, arg1: int, arg2: float, arg3: float, arg4: MinMaxStatsList, arg5: SearchResults) -> tuple:
     ...
 def init_module(seed: int) -> None:
-    """
-    (asd
-    ,)
-    """
+    ...

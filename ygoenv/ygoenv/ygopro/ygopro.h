@@ -17,7 +17,7 @@
 #include <SQLiteCpp/SQLiteCpp.h>
 #include <SQLiteCpp/VariadicBind.h>
 #include <ankerl/unordered_dense.h>
-#include <unordered_map>
+#include <unordered_set>
 
 #include "ygoenv/core/async_envpool.h"
 #include "ygoenv/core/env.h"
@@ -1234,7 +1234,7 @@ public:
                     "deck2"_.Bind(std::string("OldSchool")), "player"_.Bind(-1),
                     "play_mode"_.Bind(std::string("bot")),
                     "verbose"_.Bind(false), "max_options"_.Bind(16),
-                    "max_cards"_.Bind(75), "n_history_actions"_.Bind(16),
+                    "max_cards"_.Bind(80), "n_history_actions"_.Bind(16),
                     "max_multi_select"_.Bind(5), "record"_.Bind(false));
   }
   template <typename Config>
@@ -1377,17 +1377,18 @@ protected:
   int ha_p_1_ = 0;
   std::vector<std::vector<CardId>> h_card_ids_1_;
 
-  std::vector<std::string> revealed_;
+  std::unordered_set<std::string> revealed_;
 
   // discard hand cards
   bool discard_hand_ = false;
 
   // replay
   bool record_ = false;
-  // uint8_t *replay_data_;
-  // uint8_t *rdata_;
   FILE* fp_ = nullptr;
   bool is_recording = false;
+
+  // MSG_SELECT_COUNTER
+  int n_counters_ = 0;
 
 public:
   YGOProEnv(const Spec &spec, int env_id)
@@ -1641,12 +1642,10 @@ public:
 
   void Step(const Action &action) override {
     // clock_t start = clock();
-    // fmt::println("Step");
 
     int idx = action["action"_];
     callback_(idx);
-    // update_history_actions(to_play_, idx);
-    // fmt::println("update_history_actions");
+    update_history_actions(to_play_, idx);
 
     PlayerId player = to_play_;
 
@@ -1737,8 +1736,7 @@ private:
       };
       for (auto &[location, hidden_for_opponent] : configs) {
         // check this
-        if (opponent && (location == LOCATION_HAND) &&
-            (revealed_.size() != 0)) {
+        if (opponent && (revealed_.size() != 0)) {
           hidden_for_opponent = false;
         }
         if (opponent && hidden_for_opponent) {
@@ -1759,9 +1757,7 @@ private:
             bool hide = false;
             if (opponent) {
               hide = c.position_ & POS_FACEDOWN;
-              if ((location == LOCATION_HAND) &&
-                  (std::find(revealed_.begin(), revealed_.end(), spec) !=
-                   revealed_.end())) {
+              if (revealed_.find(spec) != revealed_.end()) {
                 hide = false;
               }
             }
@@ -1777,6 +1773,7 @@ private:
 
   void _set_obs_card_(TArray<uint8_t> &f_cards, int offset, const Card &c,
                       bool hide) {
+    // check offset exceeds max_cards
     uint8_t location = c.location_;
     bool overlay = location & LOCATION_OVERLAY;
     if (overlay) {
@@ -2156,8 +2153,8 @@ private:
           fwrite(buf, 1, 1, fp_);
           break;
         case MSG_SELECT_COUNTER:
-          ReplayWriteInt8(2);
-          fwrite(buf, 2, 1, fp_);
+          ReplayWriteInt8(2 * n_counters_);
+          fwrite(buf, 2 * n_counters_, 1, fp_);
           break;
         case MSG_SELECT_PLACE:
         case MSG_SELECT_DISFIELD:
@@ -2189,13 +2186,10 @@ private:
       state["obs:global_"_][22] = uint8_t(1);
       return;
     }
-    // fmt::println("writestate");
 
     auto [spec2index, loc_n_cards] = _set_obs_cards(state["obs:cards_"_], to_play_);
-    // fmt::println("_set_obs_cards");
 
-    // _set_obs_global(state["obs:global_"_], to_play_, loc_n_cards);
-    // fmt::println("_set_obs_global");
+    _set_obs_global(state["obs:global_"_], to_play_, loc_n_cards);
 
     // we can't shuffle because idx must be stable in callback
     if (n_options > max_options()) {
@@ -2207,12 +2201,10 @@ private:
     //   fmt::println("{} {}", key, val);
     // }
 
-    // _set_obs_actions(state["obs:actions_"_], spec2index, msg_, options_);
-    // fmt::println("_set_obs_actions");
+    _set_obs_actions(state["obs:actions_"_], spec2index, msg_, options_);
 
     n_options = options_.size();
     state["info:num_options"_] = n_options;
-    return;
 
     // update h_card_ids from state
     auto &h_card_ids = to_play_ == 0 ? h_card_ids_0_ : h_card_ids_1_;
@@ -2233,7 +2225,6 @@ private:
       }
       h_card_ids[i] = card_ids;
     }
-    // fmt::println("update h_card_ids");
 
     // write history actions
 
@@ -2247,7 +2238,6 @@ private:
                                     n_action_feats * n1);
     state["obs:h_actions_"_][n1].Assign((uint8_t *)history_actions.Data(),
                                         n_action_feats * ha_p);
-    // fmt::println("write history actions");
   }
 
   void show_decision(int idx) {
@@ -2320,8 +2310,8 @@ private:
         if ((play_mode_ == kSelfPlay) || (to_play_ == ai_player_)) {
           if (options_.size() == 1) {
             callback_(0);
-            // update_h_card_ids(to_play_, 0);
-            // update_history_actions(to_play_, 0);
+            update_h_card_ids(to_play_, 0);
+            update_history_actions(to_play_, 0);
             if (verbose_) {
               show_decision(0);
             }
@@ -2501,7 +2491,6 @@ private:
       }
       cards.push_back(c);
     }
-    fmt::println("qdp: {}, bl: {}, n: {}", qdp_, bl, cards.size());
     return cards;
   }
 
@@ -3001,8 +2990,7 @@ private:
         if (verbose_) {
           cards.push_back(get_card(c, loc, seq));
         }
-        // TODO: check if this is correct
-        revealed_.push_back(ls_to_spec(loc, seq, 0, c == player));
+        revealed_.insert(ls_to_spec(loc, seq, 0, c == player));
       }
       if (!verbose_) {
         return;
@@ -4349,9 +4337,9 @@ private:
     } else if (msg_ == MSG_SELECT_COUNTER) {
       auto player = read_u8();
       auto counter_type = read_u16();
-      auto counter_count = read_u16();
+      int counter_count = read_u16();
       int count = read_u8();
-      if (count != 1) {
+      if (count > 2) {
         throw std::runtime_error("Select counter count " +
                                  std::to_string(count) + " not implemented");
       }
@@ -4359,12 +4347,16 @@ private:
       if (verbose_) {
         pl->notify(fmt::format("Type new {} for {} card(s), separated by spaces.", "UNKNOWN_COUNTER", count));
       }
+      std::vector<int> counters;
+      counters.reserve(count);
       for (int i = 0; i < count; ++i) {
         auto code = read_u32();
         auto controller = read_u8();
         auto loc = read_u8();
         auto seq = read_u8();
         auto counter = read_u16();
+        counters.push_back(counter & 0xffff);
+
         if (verbose_) {
           pl->notify(c_get_card(code).name_ + ": " + std::to_string(counter));
         }
@@ -4372,8 +4364,17 @@ private:
         // options_.push_back(spec);
       }
       // TODO: implement action
-      uint16_t resp = counter_count & 0xffff;
-      memcpy(resp_buf_, &resp, 2);
+      n_counters_ = count;
+      uint16_t resp1 = static_cast<uint16_t>(std::min(counter_count, counters[0]));
+      memcpy(resp_buf_, &resp1, 2);
+      counter_count -= counters[0];
+      if (count == 2) {
+        uint16_t resp2 = 0;
+        if (counter_count > 0) {
+          resp2 = static_cast<uint16_t>(counter_count);
+        }
+        memcpy(resp_buf_ + 2, &resp2, 2);
+      }
       YGO_SetResponseb(pduel_, resp_buf_);
     } else if (msg_ == MSG_ANNOUNCE_NUMBER) {
       auto player = read_u8();
