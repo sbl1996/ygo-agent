@@ -24,8 +24,12 @@ cd ygo-agent
 git checkout eval_with_ptj  # checkout to the stable branch
 xmake f -y
 make
+```
 
-# Check the installation
+Sometimes you may fail to install the required libraries by xmake automatically (e.g., `glog` and `gflags`). You can install them manually and put them in the search path (LD_LIBRARY_PATH or others), then xmake will find them.
+
+After building, you can run the following command to test the environment. If you see episode logs, it means the environment is working. Try more usage in the next section!
+```bash
 cd scripts
 python -u eval.py --env-id "YGOPro-v0" --deck ../assets/deck/  --num_episodes 32 --strategy random  --lang chinese --num_envs 16
 ```

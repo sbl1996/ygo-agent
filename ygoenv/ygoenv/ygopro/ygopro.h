@@ -1384,6 +1384,7 @@ protected:
   int ms_min_ = 0;
   int ms_max_ = 0;
   std::vector<std::string> ms_specs_;
+  std::vector<int> ms_weights_;
   ankerl::unordered_dense::map<std::string, int> ms_spec2idx_;
   std::vector<int> ms_r_idxs_;
 
@@ -1589,6 +1590,67 @@ public:
     // }
   }
 
+  void init_multi_select(int min, int max, const std::vector<std::string> &specs) {
+    ms_idx_ = 0;
+    ms_min_ = min;
+    ms_max_ = max;
+    ms_specs_ = specs;
+    ms_r_idxs_.clear();
+    ms_spec2idx_.clear();
+
+    for (int j = 0; j < ms_specs_.size(); ++j) {
+      const auto &spec = ms_specs_[j];
+      options_.push_back(spec);
+      ms_spec2idx_[spec] = j;
+    }
+  }
+
+  void handle_multi_select() {
+    options_ = {};
+    for (int j = 0; j < ms_specs_.size(); ++j) {
+      if (ms_spec2idx_.find(ms_specs_[j]) != ms_spec2idx_.end()) {
+        options_.push_back(ms_specs_[j]);
+      }
+    }
+    if (ms_idx_ == ms_max_ - 1) {
+      callback_ = [this](int idx) {
+        _callback_multi_select(idx, true);
+      };
+    } else if (ms_idx_ >= ms_min_) {
+      options_.push_back("f");
+      callback_ = [this](int idx) {
+        _callback_multi_select(idx, false);
+      };
+    } else {
+      callback_ = [this](int idx) {
+        _callback_multi_select(idx, false);
+      };    
+    }
+  }
+
+  void _callback_multi_select(int idx, bool finish) {
+    const auto &option = options_[idx];
+    fmt::println("Select card: {}, finish: {}", option, finish);
+    if (option == "f") {
+      finish = true;
+    } else {
+      idx = ms_spec2idx_.at(option);
+      ms_r_idxs_.push_back(idx);
+    }
+    if (finish) {
+      ms_idx_ = -1;
+      resp_buf_[0] = ms_r_idxs_.size();
+      for (int i = 0; i < ms_r_idxs_.size(); ++i) {
+        resp_buf_[i + 1] = ms_r_idxs_[i];
+      }
+      fmt::println("{}, {}", ms_r_idxs_.size(), ms_r_idxs_);
+      YGO_SetResponseb(pduel_, resp_buf_);
+    } else {
+      ms_idx_++;
+      ms_spec2idx_.erase(option);
+    }
+  }
+
   void update_h_card_ids(PlayerId player, int idx) {
     auto &h_card_ids = player == 0 ? h_card_ids_0_ : h_card_ids_1_;
     h_card_ids[idx] = parse_card_id(options_[idx], player);
@@ -1660,32 +1722,7 @@ public:
     }
 
     if (ms_idx_ != -1) {
-      options_ = {};
-      for (int j = 0; j < ms_specs_.size(); ++j) {
-        if (ms_spec2idx_.find(ms_specs_[j]) != ms_spec2idx_.end()) {
-          options_.push_back(ms_specs_[j]);
-        }
-      }
-      int midx = ms_idx_ + 1;
-      if (midx >= ms_min_ && midx < ms_max_) {
-        options_.push_back("f");
-        callback_ = [this](int idx) {
-          const auto &option = options_[idx];
-          if (option[0] == 'f') {
-            ms_idx_ = -1;
-            resp_buf_[0] = ms_r_idxs_.size();
-            for (int i = 0; i < ms_r_idxs_.size(); ++i) {
-              resp_buf_[i + 1] = ms_r_idxs_[i];
-            }
-            YGO_SetResponseb(pduel_, resp_buf_);            
-          } else {
-            idx = ms_spec2idx_.at(option);
-            ms_idx_++;
-            ms_r_idxs_.push_back(idx);
-            ms_spec2idx_.erase(ms_specs_[idx]);
-          }
-        };
-      }
+      handle_multi_select();
     } else {
       next();
     }
@@ -2299,7 +2336,9 @@ private:
       YGO_GetMessage(pduel_, data_);
       dp_ = 0;
       while ((dp_ != dl_) || (ms_idx_ != -1)) {
-        if (ms_idx_ == -1) {
+        if (ms_idx_ != -1) {
+          handle_multi_select();
+        } else {
           handle_message();
           if (options_.empty()) {
             continue;
@@ -3600,29 +3639,11 @@ private:
         return;
       }
 
-      ms_idx_ = 0;
-      ms_min_ = min;
-      ms_max_ = max;
-      ms_specs_ = specs;
-      ms_spec2idx_.clear();
-
-      for (int j = 0; j < ms_specs_.size(); ++j) {
-        const auto &spec = ms_specs_[j];
-        options_.push_back(spec);
-        ms_spec2idx_[spec] = j;
-      }
+      init_multi_select(min, max, specs);
 
       to_play_ = player;
       callback_ = [this](int idx) {
-        if (ms_max_ == 1) {
-          ms_idx_ = -1;
-          resp_buf_[0] = 1;
-          resp_buf_[1] = static_cast<uint8_t>(idx);
-          YGO_SetResponseb(pduel_, resp_buf_);
-        }
-        ms_idx_++;
-        ms_r_idxs_.push_back(idx);
-        ms_spec2idx_.erase(ms_specs_[idx]);
+        _callback_multi_select(idx, ms_max_ == 1);
       };
     } else if (msg_ == MSG_SELECT_TRIBUTE) {
       auto player = read_u8();
@@ -3631,8 +3652,8 @@ private:
       auto max = read_u8();
       auto size = read_u8();
 
-      if (max > 3) {
-        throw std::runtime_error("Max > 3 not implemented for select tribute");
+      if (min == 0) {
+        throw std::runtime_error("Min == 0 not implemented for select tribute");
       }
 
       std::vector<int> release_params;
@@ -3684,31 +3705,16 @@ private:
           fmt::format("min({}) != max({}), not implemented for select tribute", min, max));
       }
 
-      std::vector<std::vector<int>> combs;
       if (has_weight) {
-        combs = combinations_with_weight(release_params, min);
-      } else {
-        combs = combinations(size, min);
-      }
-      for (const auto &comb : combs) {
-        std::string option = "";
-        for (int j = 0; j < min; ++j) {
-          option += specs[comb[j]];
-          if (j < int(min) - 1) {
-            option += " ";
-          }
-        }
-        options_.push_back(option);
+        throw std::runtime_error("weight not implemented for select tribute");
+        // combs = combinations_with_weight(release_params, min);
       }
 
+      init_multi_select(min, max, specs);
+
       to_play_ = player;
-      callback_ = [this, combs](int idx) {
-        const auto &comb = combs[idx];
-        resp_buf_[0] = comb.size();
-        for (int i = 0; i < comb.size(); ++i) {
-          resp_buf_[i + 1] = comb[i];
-        }
-        YGO_SetResponseb(pduel_, resp_buf_);
+      callback_ = [this](int idx) {
+        _callback_multi_select(idx, ms_max_ == 1);
       };
     } else if (msg_ == MSG_SELECT_SUM) {
       // ritual summoning mode 1 (max)
