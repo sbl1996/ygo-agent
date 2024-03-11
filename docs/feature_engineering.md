@@ -42,8 +42,8 @@
 - is_end: 1, int, 0: False, 1: True
 
 
-## Legal Actions (max 8)
-- spec index: 8, int, select target
+## Legal Actions (max 24)
+- spec index: 2, int, select target
 - msg: 1, int (16)
 - act: 1, int (11)
   - N/A
@@ -66,12 +66,15 @@
   - Battle (b)
   - Main Phase 2 (m)
   - End Phase (e)
-- cancel_finish: 1, int (3)
+- cancel: 1
   - N/A
   - Cancel
+- finish: 1
+  - N/A
   - Finish
 - position: 1, int , 0: N/A, same as position2str
 - option: 1, int, 0: N/A
+- number: 1, int, 0: N/A
 - place: 1, int (31), 0: N/A,
   - 1-7: m
   - 8-15: s
