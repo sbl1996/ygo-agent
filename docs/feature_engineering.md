@@ -1,50 +1,52 @@
 # Features
 
+## Definitions
+- float transform: max 65535 -> 2 bytes
+- count
+
 ## Card (39)
-- id: 2, uint16 -> 2 uint8, name+desc
-- location: 1, int, 0: N/A, 1+: same as location2str (9)
-- seq: 1, int, 0: N/A, 1+: seq in location
-- owner: 1, int, 0: me, 1: oppo (2)
-- position: 1, int, 0: N/A, same as position2str
-- overlay: 1, int, 0: not, 1: xyz material
-- attribute: 1, int, 0: N/A, same as attribute2str[2:]
-- race: 1, int, 0: N/A, same as race2str
-- level: 1, int, 0: N/A
-- counter: 1, int, 0: N/A
-- negated: 1, int, 0: False, 1: True
-- atk: 2, max 65535 to 2 bytes
-- def: 2, max 65535 to 2 bytes
-- type: 25, multi-hot, same as type2str
+- 0,1: card id, uint16 -> 2 uint8, name+desc
+- 2: location, discrete, 0: N/A, 1+: same as location2str (9)
+- 3: seq, discrete, 0: N/A, 1+: seq in location
+- 4: owner, discrete, 0: me, 1: oppo (2)
+- 5: position, discrete, 0: N/A, 1+: same as position2str
+- 6: overlay, discrete, 0: not, 1: xyz material
+- 7: attribute, discrete, 0: N/A, 1+: same as attribute2str[2:]
+- 8: race, discrete, 0: N/A, 1+: same as race2str
+- 9: level, discrete, 0: N/A
+- 10: counter, discrete, 0: N/A
+- 11: negated, discrete, 0: False, 1: True
+- 12,13: atk, float transform
+- 14,15: def: float transform
+- 16-40: type, multi-hot, same as type2str (25)
 
 ## Global
-- lp: 2, max 65535 to 2 bytes
-- oppo_lp: 2, max 65535 to 2 bytes
-- n_my_decks: 1, int
-- n_my_hands:
-- n_my_monsters:
-- n_my_spell_traps:
-- n_my_graves:
-- n_my_removes:
-- n_my_extras:
-- n_op_decks:
-- n_op_hands:
-- n_op_monsters:
-- n_op_spell_traps:
-- n_op_graves:
-- n_op_removes:
-- n_op_extras:
-- n_my_hands: (another embed, to enhance)
-- n_op_hands: (another embed, to enhance)
-- turn: 1, int, trunc to 8
-- phase: 1, int, one-hot (10)
-- is_first: 1, int, 0: False, 1: True
-- is_my_turn: 1, int, 0: False, 1: True
-- is_end: 1, int, 0: False, 1: True
+- 0,1: my_lp, float transform
+- 2,3: op_lp, float transform
+- 4: turn, discrete, trunc to 16
+- 5: phase, discrete (10)
+- 6: is_first, discrete, 0: False, 1: True
+- 7: is_my_turn, discrete, 0: False, 1: True
+- 8: n_my_decks, count
+- 9: n_my_hands, count
+- 10: n_my_monsters, count
+- 11: n_my_spell_traps, count
+- 12: n_my_graves, count
+- 13: n_my_removes, count
+- 14: n_my_extras, count
+- 15: n_op_decks, count
+- 16: n_op_hands, count
+- 17: n_op_monsters, count
+- 18: n_op_spell_traps, count
+- 19: n_op_graves, count
+- 20: n_op_removes, count
+- 21: n_op_extras, count
+- 22: is_end, discrete, 0: False, 1: True
 
 
 ## Legal Actions (max 24)
-- spec index: 2, int, select target
-- msg: 1, int (16)
+- 0,1: spec index or card id, uint16 -> 2 uint8
+- 2: msg, discrete, 0: N/A, 1+: same as msg2str (11)
 - act: 1, int (11)
   - N/A
   - t: Set

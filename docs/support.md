@@ -3,21 +3,8 @@
 ## Unsupported
 - Many (Crossout Designator)
 - Magician (pendulum)
-- Shiranui (Fairy Tail - Snow)
 
 # Messgae
-
-## add_counter
-Not supported
-
-## select_card
-- `min` and `max` <= 5 are supported
-- `min` > 5 throws an error
-- `max` > 5 is truncated to 5
-
-### related cards
-- Fairy Tail - Snow (min=max=7)
-- Pot of Prosperity (min=max=6)
 
 ## announce_card
 Not supported:

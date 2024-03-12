@@ -11,6 +11,8 @@
 #include <fstream>
 #include <shared_mutex>
 #include <iostream>
+#include <set>
+
 
 #include <fmt/core.h>
 #include <fmt/ranges.h>
@@ -1381,10 +1383,12 @@ protected:
 
   // multi select
   int ms_idx_ = -1;
+  int ms_mode_ = 0;
   int ms_min_ = 0;
   int ms_max_ = 0;
+  int ms_must_ = 0;
   std::vector<std::string> ms_specs_;
-  std::vector<int> ms_weights_;
+  std::vector<std::vector<int>> ms_combs_;
   ankerl::unordered_dense::map<std::string, int> ms_spec2idx_;
   std::vector<int> ms_r_idxs_;
 
@@ -1590,47 +1594,110 @@ public:
     // }
   }
 
-  void init_multi_select(int min, int max, const std::vector<std::string> &specs) {
+  void init_multi_select(
+    int min, int max, int must, const std::vector<std::string> &specs,
+    int mode = 0, const std::vector<std::vector<int>> &combs = {}) {
     ms_idx_ = 0;
+    ms_mode_ = mode;
     ms_min_ = min;
     ms_max_ = max;
+    ms_must_ = must;
     ms_specs_ = specs;
     ms_r_idxs_.clear();
     ms_spec2idx_.clear();
 
     for (int j = 0; j < ms_specs_.size(); ++j) {
       const auto &spec = ms_specs_[j];
-      options_.push_back(spec);
       ms_spec2idx_[spec] = j;
+    }
+
+    if (ms_mode_ == 0) {
+      for (int j = 0; j < ms_specs_.size(); ++j) {
+        const auto &spec = ms_specs_[j];
+        options_.push_back(spec);
+      }
+    } else {
+        ms_combs_ = combs;
+      _callback_multi_select_2_prepare();
     }
   }
 
   void handle_multi_select() {
     options_ = {};
-    for (int j = 0; j < ms_specs_.size(); ++j) {
-      if (ms_spec2idx_.find(ms_specs_[j]) != ms_spec2idx_.end()) {
-        options_.push_back(ms_specs_[j]);
+    if (ms_mode_ == 0) {
+      for (int j = 0; j < ms_specs_.size(); ++j) {
+        if (ms_spec2idx_.find(ms_specs_[j]) != ms_spec2idx_.end()) {
+          options_.push_back(ms_specs_[j]);
+        }
+      }
+      if (ms_idx_ == ms_max_ - 1) {
+        callback_ = [this](int idx) {
+          _callback_multi_select(idx, true);
+        };
+      } else if (ms_idx_ >= ms_min_) {
+        options_.push_back("f");
+        callback_ = [this](int idx) {
+          _callback_multi_select(idx, false);
+        };
+      } else {
+        callback_ = [this](int idx) {
+          _callback_multi_select(idx, false);
+        };    
+      }
+    } else {
+      _callback_multi_select_2_prepare();
+      callback_ = [this](int idx) {
+        _callback_multi_select_2(idx);
+      };
+    }
+  }
+
+  void _callback_multi_select_2(int idx) {
+    const auto &option = options_[idx];
+    idx = ms_spec2idx_.at(option);
+    ms_r_idxs_.push_back(idx);
+    std::vector<std::vector<int>> combs;
+    for (auto &c : ms_combs_) {
+      if (c[0] == idx) {
+        c.erase(c.begin());
+        if (c.empty()) {
+          _callback_multi_select_2_finish();
+          return;
+        } else {
+          combs.push_back(c);
+        }
       }
     }
-    if (ms_idx_ == ms_max_ - 1) {
-      callback_ = [this](int idx) {
-        _callback_multi_select(idx, true);
-      };
-    } else if (ms_idx_ >= ms_min_) {
-      options_.push_back("f");
-      callback_ = [this](int idx) {
-        _callback_multi_select(idx, false);
-      };
-    } else {
-      callback_ = [this](int idx) {
-        _callback_multi_select(idx, false);
-      };    
+    ms_idx_++;
+    ms_combs_ = combs;
+  }
+
+  void _callback_multi_select_2_prepare() {
+    std::set<int> comb;
+    for (const auto &c : ms_combs_) {
+      comb.insert(c[0]);
     }
+    for (auto &i : comb) {
+      const auto &spec = ms_specs_[i];
+      options_.push_back(spec);
+    }
+  }
+
+  void _callback_multi_select_2_finish() {
+    ms_idx_ = -1;
+    resp_buf_[0] = ms_r_idxs_.size() + ms_must_;
+    for (int i = 0; i < ms_must_; ++i) {
+      resp_buf_[i + 1] = 0;
+    }
+    for (int i = 0; i < ms_r_idxs_.size(); ++i) {
+      resp_buf_[i + ms_must_ + 1] = ms_r_idxs_[i];
+    }
+    YGO_SetResponseb(pduel_, resp_buf_);
   }
 
   void _callback_multi_select(int idx, bool finish) {
     const auto &option = options_[idx];
-    fmt::println("Select card: {}, finish: {}", option, finish);
+    // fmt::println("Select card: {}, finish: {}", option, finish);
     if (option == "f") {
       finish = true;
     } else {
@@ -1643,7 +1710,7 @@ public:
       for (int i = 0; i < ms_r_idxs_.size(); ++i) {
         resp_buf_[i + 1] = ms_r_idxs_[i];
       }
-      fmt::println("{}, {}", ms_r_idxs_.size(), ms_r_idxs_);
+      // fmt::println("{}, {}", ms_r_idxs_.size(), ms_r_idxs_);
       YGO_SetResponseb(pduel_, resp_buf_);
     } else {
       ms_idx_++;
@@ -3639,7 +3706,7 @@ private:
         return;
       }
 
-      init_multi_select(min, max, specs);
+      init_multi_select(min, max, 0, specs);
 
       to_play_ = player;
       callback_ = [this](int idx) {
@@ -3710,7 +3777,7 @@ private:
         // combs = combinations_with_weight(release_params, min);
       }
 
-      init_multi_select(min, max, specs);
+      init_multi_select(min, max, 0, specs);
 
       to_play_ = player;
       callback_ = [this](int idx) {
@@ -3721,8 +3788,8 @@ private:
       auto mode = read_u8();
       auto player = read_u8();
       auto val = read_u32();
-      int min = read_u8();
-      int max = read_u8();
+      int _min = read_u8();
+      int _max = read_u8();
       auto must_select_size = read_u8();
 
       if (mode == 0) {
@@ -3736,13 +3803,8 @@ private:
                                  " not implemented for MSG_SELECT_SUM");
       }
 
-      std::vector<int> must_select_params;
-      std::vector<std::string> must_select_specs;
       std::vector<int> select_params;
       std::vector<std::string> select_specs;
-
-      must_select_params.reserve(must_select_size);
-      must_select_specs.reserve(must_select_size);
 
       int expected = val;
       if (verbose_) {
@@ -3756,7 +3818,6 @@ private:
           auto param = read_u32();
           Card card = get_card(controller, loc, seq);
           must_select.push_back(card);
-          must_select_params.push_back(param);
           expected -= (param & 0xff);
         }
         auto pl = players_[player];
@@ -3764,7 +3825,6 @@ private:
                    std::to_string(expected) + ", seperated by spaces.");
         for (const auto &card : must_select) {
           auto spec = card.get_spec(player);
-          must_select_specs.push_back(spec);
           pl->notify(card.name_ + " (" + spec +
                      ") must be selected, automatically selected.");
         }
@@ -3777,8 +3837,6 @@ private:
           auto param = read_u32();
 
           auto spec = ls_to_spec(loc, seq, 0, controller != player);
-          must_select_specs.push_back(spec);
-          must_select_params.push_back(param);
           expected -= (param & 0xff);
         }
       }
@@ -3834,32 +3892,21 @@ private:
         card_levels.push_back(levels);
       }
 
+      // We assume any card_level can be the first
+
       std::vector<std::vector<int>> combs =
           combinations_with_weight2(card_levels, expected);
-
-      for (const auto &comb : combs) {
-        std::string option = "";
-        int size = comb.size();
-        for (int j = 0; j < size; ++j) {
-          option += select_specs[comb[j]];
-          if (j < size - 1) {
-            option += " ";
-          }
-        }
-        options_.push_back(option);
+      
+      for (auto &comb : combs) {
+        std::sort(comb.begin(), comb.end());
       }
 
+      init_multi_select(
+        _min, _max, must_select_size, select_specs, 1, combs);
+
       to_play_ = player;
-      callback_ = [this, combs, must_select_size](int idx) {
-        const auto &comb = combs[idx];
-        resp_buf_[0] = must_select_size + comb.size();
-        for (int i = 0; i < must_select_size; ++i) {
-          resp_buf_[i + 1] = 0;
-        }
-        for (int i = 0; i < comb.size(); ++i) {
-          resp_buf_[i + must_select_size + 1] = comb[i];
-        }
-        YGO_SetResponseb(pduel_, resp_buf_);
+      callback_ = [this](int idx) {
+        _callback_multi_select_2(idx);
       };
 
     } else if (msg_ == MSG_SELECT_CHAIN) {
