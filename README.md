@@ -81,7 +81,8 @@ python -u eval.py --agent --checkpoint checkpoints/1234_1000M.pt --num_embedding
 - MCTS-based planning
 - Support of play in YGOPro
 
-### Related Projects
+## Related Projects
+- [ygopro-core](https://github.com/Fluorohydride/ygopro-core)
+- [envpool](https://github.com/sail-sg/envpool)
 - [yugioh-ai](https://github.com/melvinzhang/yugioh-ai])
 - [yugioh-game](https://github.com/tspivey/yugioh-game)
-- [envpool](https://github.com/sail-sg/envpool)
