@@ -72,10 +72,6 @@ python -u eval.py --agent --checkpoint checkpoints/1234_1000M.pt --num_embedding
 
 ## TODO
 
-### Documentation
-
-- Add documentations of building and running
-
 ### Training
 - Evaluation with old models during training
 - LSTM for memory
@@ -85,6 +81,7 @@ python -u eval.py --agent --checkpoint checkpoints/1234_1000M.pt --num_embedding
 - MCTS-based planning
 - Support of play in YGOPro
 
-
-## Related Projects
-TODO
+### Related Projects
+- [yugioh-ai](https://github.com/melvinzhang/yugioh-ai])
+- [yugioh-game](https://github.com/tspivey/yugioh-game)
+- [envpool](https://github.com/sail-sg/envpool)

@@ -12,7 +12,10 @@ AUTHOR = 'Hastur'
 REQUIRES_PYTHON = '>=3.8.0'
 VERSION = None
 
-REQUIRED = []
+REQUIRED = [
+  "tyro",
+  "pandas",
+]
 
 here = os.path.dirname(os.path.abspath(__file__))
 

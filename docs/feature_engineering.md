@@ -4,7 +4,7 @@
 - float transform: max 65535 -> 2 bytes
 - count
 
-## Card (39)
+## Card
 - 0,1: card id, uint16 -> 2 uint8, name+desc
 - 2: location, discrete, 0: N/A, 1+: same as location2str (9)
 - 3: seq, discrete, 0: N/A, 1+: seq in location
@@ -44,10 +44,10 @@
 - 22: is_end, discrete, 0: False, 1: True
 
 
-## Legal Actions (max 24)
-- 0,1: spec index or card id, uint16 -> 2 uint8
-- 2: msg, discrete, 0: N/A, 1+: same as msg2str (11)
-- act: 1, int (11)
+## Legal Actions
+- 0,1: spec index, uint16 -> 2 uint8
+- 2: msg, discrete, 0: N/A, 1+: same as msg2str (15)
+- 3: act, discrete (11)
   - N/A
   - t: Set
   - r: Reposition
@@ -59,32 +59,33 @@
   - v2: Activate the second effect
   - v3: Activate the third effect
   - v4: Activate the fourth effect
-- yes/no: 1, int (3)
+- 4: yes/no, discrete (3)
   - N/A
   - Yes
   - No
-- phase: 1, int (4)
+- 5: phase, discrete (4)
   - N/A
   - Battle (b)
   - Main Phase 2 (m)
   - End Phase (e)
-- cancel: 1
+- 6: cancel, discrete (2)
   - N/A
   - Cancel
-- finish: 1
+- 7: finish, discrete (2)
   - N/A
   - Finish
-- position: 1, int , 0: N/A, same as position2str
-- option: 1, int, 0: N/A
-- number: 1, int, 0: N/A
-- place: 1, int (31), 0: N/A,
+- 8: position, discrete, 0: N/A, same as position2str
+- 9: option, discrete, 0: N/A
+- 10: number, discrete, 0: N/A
+- 11: place, discrete
+  - 0: N/A
   - 1-7: m
   - 8-15: s
   - 16-22: om
   - 23-30: os
-- attribute: 1, int, 0: N/A, same as attribute2id
+- 12: attribute, discrete, 0: N/A, same as attribute2id
 
 
 ## History Actions
-- id: 2x4, uint16 -> 2 uint8, name+desc
-- same as Legal Actions
+- 0,1: card id, uint16 -> 2 uint8
+- others same as legal actions

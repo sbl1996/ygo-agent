@@ -142,7 +142,7 @@ if __name__ == "__main__":
     envs = RecordEpisodeStatistics(envs)
 
     if args.agent:
-        if args.checkpoint.endswith(".ptj"):
+        if args.checkpoint and args.checkpoint.endswith(".ptj"):
             agent = torch.jit.load(args.checkpoint)
         else:
             # count lines of code_list
