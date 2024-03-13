@@ -98,7 +98,7 @@ class Args:
     """the target KL divergence threshold"""
     learn_opponent: bool = True
     """if toggled, the samples from the opponent will be used to train the agent"""
-    collect_length: int = None
+    collect_length: Optional[int] = None
     """the length of the buffer, only the first `num_steps` will be used for training (partial GAE)"""
 
     backend: Literal["gloo", "nccl", "mpi"] = "nccl"
