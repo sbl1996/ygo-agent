@@ -1392,7 +1392,6 @@ protected:
   ankerl::unordered_dense::map<std::string, int> ms_spec2idx_;
   std::vector<int> ms_r_idxs_;
 
-
   // discard hand cards
   bool discard_hand_ = false;
 
@@ -1470,6 +1469,7 @@ public:
     }
 
     turn_count_ = 0;
+    ms_idx_ = -1;
 
     history_actions_0_.Zero();
     history_actions_1_.Zero();
@@ -1710,7 +1710,6 @@ public:
       for (int i = 0; i < ms_r_idxs_.size(); ++i) {
         resp_buf_[i + 1] = ms_r_idxs_[i];
       }
-      // fmt::println("{}, {}", ms_r_idxs_.size(), ms_r_idxs_);
       YGO_SetResponseb(pduel_, resp_buf_);
     } else {
       ms_idx_++;
@@ -1748,6 +1747,14 @@ public:
 
   void show_turn() const {
     fmt::println("turn: {}, phase: {}, tplayer: {}", turn_count_, phase_to_string(current_phase_), tp_);
+  }
+
+  void show_buffer() const {
+    fmt::println("msg: {}, dp: {}, dl: {}", msg_to_string(msg_), dp_, dl_);
+    for (int i = 0; i < dl_; ++i) {
+      fmt::print("{:02x} ", data_[i]);
+    }
+    fmt::print("\n");
   }
 
   void show_deck(PlayerId player) const {
@@ -1997,11 +2004,16 @@ private:
       if (it == spec2index.end()) {
         // TODO: find the root cause
         // print spec2index
-        fmt::println("Spec2index:");
+        show_deck(0);
+        show_deck(1);
+        show_buffer();
+        show_turn();
+        fmt::println("MS: idx: {}, mode: {}, min: {}, max: {}, must: {}, specs: {}, combs: {}", ms_idx_, ms_mode_, ms_min_, ms_max_, ms_must_, ms_specs_, ms_combs_);
+        fmt::println("Spec: {}, Spec2index:", spec);
         for (auto &[k, v] : spec2index) {
           fmt::println("{}: {}", k, v);
         }
-        // throw std::runtime_error("Spec not found: " + spec);
+        throw std::runtime_error("Spec not found: " + spec);
         idx = 1;
       } else {
         idx = it->second;
@@ -4533,11 +4545,7 @@ private:
     } else {
       show_deck(0);
       show_deck(1);
-      // print byte by byte
-      for (int i = 0; i < dp_; ++i) {
-        fmt::print("{:02x} ", data_[i]);
-      }
-      fmt::print("\n");
+      show_buffer();
       throw std::runtime_error(
         fmt::format("Unknown message {}, length {}, dp {}",
         msg_to_string(msg_), dl_, dp_));

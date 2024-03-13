@@ -153,7 +153,6 @@ if __name__ == "__main__":
                     embedding_shape = len(code_list)
             L = args.num_layers
             agent = Agent(args.num_channels, L, L, 2, embedding_shape).to(device)
-            # agent = agent.eval()
             if args.checkpoint:
                 state_dict = torch.load(args.checkpoint, map_location=device)
                 if not args.compile:

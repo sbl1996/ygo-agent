@@ -275,6 +275,8 @@ def main():
             traced_model = torch.jit.trace(agent, (obs,), check_tolerance=False, check_trace=False)
 
         train_step = torch.compile(train_step, mode=args.compile)
+    else:
+        traced_model = agent
 
     # ALGO Logic: Storage setup
     obs = create_obs(obs_space, (args.num_steps, args.local_num_envs), device)
