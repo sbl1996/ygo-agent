@@ -112,8 +112,8 @@ inline bool sum_to2(const std::vector<std::vector<int>> &w,
 }
 
 inline std::vector<std::vector<int>>
-combinations_with_weight2(const std::vector<std::vector<int>> &weights,
-                          int r) {
+combinations_with_weight2(
+  const std::vector<std::vector<int>> &weights, int r) {
   int n = weights.size();
   std::vector<std::vector<int>> results;
 
@@ -1771,9 +1771,9 @@ public:
       uint8_t msg_id = uint8_t(ha(i, 2));
       int msg = _msgs[msg_id - 1];
       fmt::print("msg: {},", msg_to_string(msg));
-      auto v1 = static_cast<CardId>(ha(i, 0));
-      auto v2 = static_cast<CardId>(ha(i, 1));
-      CardId card_id = (v1 << 8) + v2;
+      uint8_t v1 = ha(i, 0);
+      uint8_t v2 = ha(i, 1);
+      CardId card_id = (static_cast<CardId>(v1) << 8) + static_cast<CardId>(v2);
       fmt::print(" {};", card_id);
       for (int j = 3; j < ha.Shape()[1]; j++) {
         fmt::print(" {}", uint8_t(ha(i, j)));
@@ -2326,15 +2326,13 @@ private:
     for (int i = 0; i < n_options; ++i) {
       uint8_t spec_index1 = state["obs:actions_"_](i, 0);
       uint8_t spec_index2 = state["obs:actions_"_](i, 1);
-      uint16_t spec_index = (spec_index1 << 8) + spec_index2;
+      uint16_t spec_index = (static_cast<uint16_t>(spec_index1) << 8) + static_cast<uint16_t>(spec_index2);
       if (spec_index == 0) {
         h_card_ids[i] = 0;
       } else {
-        uint16_t card_id1 =
-            static_cast<uint16_t>(state["obs:cards_"_](spec_index - 1, 0));
-        uint16_t card_id2 =
-            static_cast<uint16_t>(state["obs:cards_"_](spec_index - 1, 1));
-        h_card_ids[i] = (card_id1 << 8) + card_id2;
+        uint8_t card_id1 = state["obs:cards_"_](spec_index - 1, 0);
+        uint8_t card_id2 = state["obs:cards_"_](spec_index - 1, 1);
+        h_card_ids[i] = (static_cast<uint16_t>(card_id1) << 8) + static_cast<uint16_t>(card_id2);
       }
     }
 
