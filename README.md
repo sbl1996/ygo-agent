@@ -62,7 +62,7 @@ python -u eval.py --env-id "YGOPro-v0" --deck ../assets/deck/  --num_episodes 32
 
 ### Obtain a trained agent
 
-We provide some trained agents in the [releases](https://github.com/sbl1996/ygo-agent/releases/tag/v0.1). Check these `ptj` TorchScript files and download them to your local machine. The following usage assumes you have it.
+We provide some trained agents in the [releases](https://github.com/sbl1996/ygo-agent/releases/tag/v0.1). Check these TorchScript files named with `{commit_hash}_{exp_id}_{step}.ptj` and download them to your local machine. Switch to the corresponding commit hash before using it. The following usage assumes you have it.
 
 Notice that the provided `ptj` can only run on GPU, but not CPU. Actually, the agent can run in real-time on CPU, we will provide a CPU version in the future.
 
