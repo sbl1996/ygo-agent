@@ -2013,7 +2013,7 @@ private:
         for (auto &[k, v] : spec2index) {
           fmt::println("{}: {}", k, v);
         }
-        throw std::runtime_error("Spec not found: " + spec);
+        // throw std::runtime_error("Spec not found: " + spec);
         idx = 1;
       } else {
         idx = it->second;
