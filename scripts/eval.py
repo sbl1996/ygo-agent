@@ -29,7 +29,7 @@ class Args:
 
     env_id: str = "YGOPro-v0"
     """the id of the environment"""
-    deck: str = "../assets/deck/OldSchool.ydk"
+    deck: str = "../assets/deck"
     """the deck file to use"""
     deck1: Optional[str] = None
     """the deck file for the first player"""

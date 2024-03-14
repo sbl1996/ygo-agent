@@ -93,6 +93,8 @@ After training, we can serialize the trained agent model to a file for later use
 python -u eval.py --agent --checkpoint checkpoints/1234_1000M.pt --num_embeddings 999 --convert --optimize
 ```
 
+If you have used `--embedding_file` during training, skip the `--num_embeddings` option.
+
 ## Training
 
 Training an agent requires a lot of computational resources, typically 8x4090 GPUs and 128-core CPU for a few days. We don't recommend training the agent on your local machine. Reducing the number of decks for training may reduce the computational resources required.
@@ -159,6 +161,7 @@ The script options are mostly the same as the single GPU training. We only scale
 ## Plan
 
 ### Training
+- Add opponent history actions and turn info to the history actions
 - Evaluation with old models during training
 - LSTM for memory
 - League training following AlphaStar and ROA-Star
