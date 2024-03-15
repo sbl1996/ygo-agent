@@ -98,6 +98,8 @@ if __name__ == "__main__":
     if args.record:
         assert args.num_envs == 1, "Recording only works with a single environment"
         assert args.verbose, "Recording only works with verbose mode"
+        if not os.path.exists("replay"):
+            os.makedirs("replay")
 
     args.env_threads = min(args.env_threads or args.num_envs, args.num_envs)
     args.torch_threads = args.torch_threads or int(os.getenv("OMP_NUM_THREADS", "4"))
