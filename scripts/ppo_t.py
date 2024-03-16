@@ -102,8 +102,10 @@ class Args:
     """the maximum norm for the gradient clipping"""
     target_kl: Optional[float] = None
     """the target KL divergence threshold"""
-    learn_opponent: bool = True
+    learn_opponent: bool = False
     """if toggled, the samples from the opponent will be used to train the agent"""
+    collect_length: Optional[int] = None
+    """the length of the buffer, only the first `num_steps` will be used for training (partial GAE)"""
 
     backend: Literal["gloo", "nccl", "mpi"] = "nccl"
     """the backend for distributed training"""
@@ -161,6 +163,9 @@ def main():
     args.num_iterations = args.total_timesteps // args.batch_size
     args.env_threads = args.env_threads or args.num_envs
     args.torch_threads = args.torch_threads or (int(os.getenv("OMP_NUM_THREADS", "2")) * args.world_size)
+    args.collect_length = args.collect_length or args.num_steps
+
+    assert args.collect_length >= args.num_steps, "collect_length must be greater than or equal to num_steps"
 
     local_torch_threads = args.torch_threads // args.world_size
     local_env_threads = args.env_threads // args.world_size
@@ -248,7 +253,7 @@ def main():
     else:
         embedding_shape = None
     L = args.num_layers
-    agent = Agent(args.num_channels, L, L, 2, embedding_shape).to(device)
+    agent = Agent(args.num_channels, L, L, embedding_shape).to(device)
     agent.eval()
 
     if args.checkpoint:
@@ -260,22 +265,19 @@ def main():
     if args.embedding_file:
         agent.freeze_embeddings()
 
+    agent_t = Agent(args.num_channels, L, L, embedding_shape).to(device)
+    agent_t.eval()
+    agent_t.load_state_dict(agent.state_dict())
+
     optim_params = list(agent.parameters())
     optimizer = optim.Adam(optim_params, lr=args.learning_rate, eps=1e-5)
 
     scaler = GradScaler(enabled=args.fp16_train, init_scale=2 ** 8)
 
-    agent_t = Agent(args.num_channels, L, L, 2, embedding_shape).to(device)
-    agent_t.eval()
-    agent_t.load_state_dict(agent.state_dict())
-
-    def predict_step(agent: Agent, agent_t: Agent, next_obs, learn):
+    def predict_step(agent: Agent, next_obs):
         with torch.no_grad():
             with autocast(enabled=args.fp16_eval):
                 logits, value, valid = agent(next_obs)
-                logits_t, value_t, valid = agent_t(next_obs)
-        logits = torch.where(learn[:, None], logits, logits_t)
-        value = torch.where(learn[:, None], value, value_t)
         return logits, value
 
     from ygoai.rl.ppo import train_step
@@ -289,15 +291,18 @@ def main():
         traced_model_t = torch.jit.optimize_for_inference(traced_model_t)
 
         train_step = torch.compile(train_step, mode=args.compile)
+    else:
+        traced_model = agent
+        traced_model_t = agent_t
 
     # ALGO Logic: Storage setup
-    obs = create_obs(obs_space, (args.num_steps, args.local_num_envs), device)
-    actions = torch.zeros((args.num_steps, args.local_num_envs) + action_shape).to(device)
-    logprobs = torch.zeros((args.num_steps, args.local_num_envs)).to(device)
-    rewards = torch.zeros((args.num_steps, args.local_num_envs)).to(device)
-    dones = torch.zeros((args.num_steps, args.local_num_envs), dtype=torch.bool).to(device)
-    values = torch.zeros((args.num_steps, args.local_num_envs)).to(device)
-    learns = torch.zeros((args.num_steps, args.local_num_envs), dtype=torch.bool).to(device)
+    obs = create_obs(obs_space, (args.collect_length, args.local_num_envs), device)
+    actions = torch.zeros((args.collect_length, args.local_num_envs) + action_shape).to(device)
+    logprobs = torch.zeros((args.collect_length, args.local_num_envs)).to(device)
+    rewards = torch.zeros((args.collect_length, args.local_num_envs)).to(device)
+    dones = torch.zeros((args.collect_length, args.local_num_envs), dtype=torch.bool).to(device)
+    values = torch.zeros((args.collect_length, args.local_num_envs)).to(device)
+    learns = torch.zeros((args.collect_length, args.local_num_envs), dtype=torch.bool).to(device)
     avg_ep_returns = deque(maxlen=1000)
     avg_win_rates = deque(maxlen=1000)
     version = 0
@@ -318,6 +323,7 @@ def main():
     np.random.shuffle(ai_player1_)
     ai_player1 = to_tensor(ai_player1_, device, dtype=next_to_play.dtype)
     next_value = 0
+    step = 0
 
     for iteration in range(1, args.num_iterations + 1):
         # Annealing the rate if instructed to do so.
@@ -329,7 +335,7 @@ def main():
         model_time = 0
         env_time = 0
         collect_start = time.time()
-        for step in range(0, args.num_steps):
+        while step < args.collect_length:
             global_step += args.num_envs
 
             for key in obs:
@@ -339,7 +345,10 @@ def main():
             learns[step] = learn
 
             _start = time.time()
-            logits, value = predict_step(traced_model, traced_model_t, next_obs, learn)
+            logits, value = predict_step(traced_model, next_obs)
+            logits_t, value_t = predict_step(traced_model_t, next_obs)
+            logits = torch.where(learn[:, None], logits, logits_t)
+            value = torch.where(learn[:, None], value, value_t)
             value = value.flatten()
             probs = Categorical(logits=logits)
             action = probs.sample()
@@ -362,6 +371,7 @@ def main():
             env_time += time.time() - _start
             rewards[step] = to_tensor(reward, device)
             next_obs, next_done = to_tensor(next_obs, device, torch.uint8), to_tensor(next_done_, device, torch.bool)
+            step += 1
 
             if not writer:
                 continue
@@ -390,6 +400,8 @@ def main():
         if local_rank == 0:
             fprint(f"collect_time={collect_time:.4f}, model_time={model_time:.4f}, env_time={env_time:.4f}")
 
+        step = args.collect_length - args.num_steps
+
         _start = time.time()
         # bootstrap value if not done
         with torch.no_grad():
@@ -397,23 +409,36 @@ def main():
             value_t = traced_model_t(next_obs)[1].reshape(-1)
             value = torch.where(next_to_play == ai_player1, value, value_t)
         nextvalues = torch.where(next_to_play == ai_player1, value, next_value)
+
+        if step > 0 and iteration != 1:
+            # recalculate the values for the first few steps
+            v_steps = args.local_minibatch_size * 4 // args.local_num_envs
+            for v_start in range(0, step, v_steps):
+                v_end = min(v_start + v_steps, step)
+                v_obs = {
+                    k: v[v_start:v_end].flatten(0, 1) for k, v in obs.items()
+                }
+                with torch.no_grad():
+                    # value = traced_get_value(v_obs).reshape(v_end - v_start, -1)
+                    value = predict_step(traced_model, v_obs)[1].reshape(v_end - v_start, -1)
+                values[v_start:v_end] = value
+
         advantages = bootstrap_value_self(
             values, rewards, dones, learns, nextvalues, next_done, args.gamma, args.gae_lambda)
-        returns = advantages + values
         bootstrap_time = time.time() - _start
 
         _start = time.time()
         # flatten the batch
         b_obs = {
-            k: v.reshape((-1,) + v.shape[2:])
+            k: v[:args.num_steps].reshape((-1,) + v.shape[2:])
             for k, v in obs.items()
         }
-        b_logprobs = logprobs.reshape(-1)
-        b_actions = actions.reshape((-1,) + action_shape)
-        b_advantages = advantages.reshape(-1)
-        b_returns = returns.reshape(-1)
-        b_values = values.reshape(-1)
-        b_learns = learns.reshape(-1)
+        b_actions = actions[:args.num_steps].reshape((-1,) + action_shape)
+        b_logprobs = logprobs[:args.num_steps].reshape(-1)
+        b_advantages = advantages[:args.num_steps].reshape(-1)
+        b_values = values[:args.num_steps].reshape(-1)
+        b_learns = torch.ones_like(b_values, dtype=torch.bool) if args.learn_opponent else learns[:args.num_steps].reshape(-1)
+        b_returns = b_advantages + b_values
 
         # Optimizing the policy and value network
         b_inds = np.arange(args.local_batch_size)
@@ -437,7 +462,14 @@ def main():
 
             if args.target_kl is not None and approx_kl > args.target_kl:
                 break
-        
+
+        if step > 0:
+            # TODO: use cyclic buffer to avoid copying
+            for v in obs.values():
+                v[:step] = v[args.num_steps:].clone()
+            for v in [actions, logprobs, rewards, dones, values, learns]:
+                v[:step] = v[args.num_steps:].clone()
+
         train_time = time.time() - _start
 
         if local_rank == 0:
@@ -497,7 +529,7 @@ def main():
 
             _start = time.time()
             eval_return = evaluate(
-                eval_envs, traced_model, local_eval_episodes, device, args.fp16_eval)
+                eval_envs, traced_model, local_eval_episodes, device, args.fp16_eval)[0]
             eval_stats = torch.tensor(eval_return, dtype=torch.float32, device=device)
 
             # sync the statistics

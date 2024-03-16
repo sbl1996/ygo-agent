@@ -140,8 +140,8 @@ if __name__ == "__main__":
                 code_list = f.readlines()
                 embedding_shape = len(code_list)
         L = args.num_layers
-        agent1 = Agent(args.num_channels, L, L, 2, embedding_shape).to(device)
-        agent2 = Agent(args.num_channels, L, L, 2, embedding_shape).to(device)
+        agent1 = Agent(args.num_channels, L, L, embedding_shape).to(device)
+        agent2 = Agent(args.num_channels, L, L, embedding_shape).to(device)
 
         for agent, ckpt in zip([agent1, agent2], [args.checkpoint1, args.checkpoint2]):
             state_dict = torch.load(ckpt, map_location=device)

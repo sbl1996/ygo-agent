@@ -5,6 +5,7 @@ from collections import deque
 from dataclasses import dataclass
 from typing import Literal, Optional
 
+
 import ygoenv
 import numpy as np
 import tyro
@@ -247,7 +248,7 @@ def main():
     else:
         embedding_shape = None
     L = args.num_layers
-    agent = Agent(args.num_channels, L, L, 2, embedding_shape).to(device)
+    agent = Agent(args.num_channels, L, L, embedding_shape).to(device)
     agent.eval()
 
     if args.checkpoint:
@@ -274,9 +275,9 @@ def main():
     if args.compile:
         # It seems that using torch.compile twice cause segfault at start, so we use torch.jit.trace here
         # predict_step = torch.compile(predict_step, mode=args.compile)
-        obs = create_obs(envs.observation_space, (args.local_num_envs,), device=device)
+        example_obs = create_obs(envs.observation_space, (args.local_num_envs,), device=device)
         with torch.no_grad():
-            traced_model = torch.jit.trace(agent, (obs,), check_tolerance=False, check_trace=False)
+            traced_model = torch.jit.trace(agent, (example_obs,), check_tolerance=False, check_trace=False)
 
         train_step = torch.compile(train_step, mode=args.compile)
     else:
@@ -389,7 +390,7 @@ def main():
         _start = time.time()
         # bootstrap value if not done
         with torch.no_grad():
-            value = traced_model(next_obs)[1].reshape(-1)
+            value = predict_step(traced_model, next_obs)[1].reshape(-1)
         nextvalues1 = torch.where(next_to_play == ai_player1, value, next_value1)
         nextvalues2 = torch.where(next_to_play != ai_player1, value, next_value2)
 
@@ -403,7 +404,7 @@ def main():
                 }
                 with torch.no_grad():
                     # value = traced_get_value(v_obs).reshape(v_end - v_start, -1)
-                    value = traced_model(v_obs)[1].reshape(v_end - v_start, -1)
+                    value = predict_step(traced_model, v_obs)[1].reshape(v_end - v_start, -1)
                 values[v_start:v_end] = value
 
         advantages = bootstrap_value_selfplay(
@@ -420,7 +421,7 @@ def main():
         b_logprobs = logprobs[:args.num_steps].reshape(-1)
         b_advantages = advantages[:args.num_steps].reshape(-1)
         b_values = values[:args.num_steps].reshape(-1)
-        b_learns = learns[:args.num_steps].reshape(-1)
+        b_learns = torch.ones_like(b_values, dtype=torch.bool) if args.learn_opponent else learns[:args.num_steps].reshape(-1)
         b_returns = b_advantages + b_values
 
         # Optimizing the policy and value network

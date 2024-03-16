@@ -11,8 +11,7 @@ def train_step(agent, optimizer, scaler, mb_obs, mb_actions, mb_logprobs, mb_adv
         probs = Categorical(logits=logits)
         newlogprob = probs.log_prob(mb_actions)
         entropy = probs.entropy()
-    if not args.learn_opponent:
-        valid = torch.logical_and(valid, mb_learns)
+    valid = torch.logical_and(valid, mb_learns)
     logratio = newlogprob - mb_logprobs
     ratio = logratio.exp()
 

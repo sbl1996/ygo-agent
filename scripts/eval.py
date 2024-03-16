@@ -154,7 +154,7 @@ if __name__ == "__main__":
                     code_list = f.readlines()
                     embedding_shape = len(code_list)
             L = args.num_layers
-            agent = Agent(args.num_channels, L, L, 2, embedding_shape).to(device)
+            agent = Agent(args.num_channels, L, L, embedding_shape).to(device)
             if args.checkpoint:
                 state_dict = torch.load(args.checkpoint, map_location=device)
                 if not args.compile:

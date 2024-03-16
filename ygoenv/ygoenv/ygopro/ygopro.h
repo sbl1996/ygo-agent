@@ -1870,10 +1870,10 @@ private:
   std::tuple<SpecIndex, std::vector<int>> _set_obs_cards(TArray<uint8_t> &f_cards, PlayerId to_play) {
     SpecIndex spec2index;
     std::vector<int> loc_n_cards;
+    int offset = 0;
     for (auto pi = 0; pi < 2; pi++) {
       const PlayerId player = (to_play + pi) % 2;
       const bool opponent = pi == 1;
-      int offset = opponent ? spec_.config["max_cards"_] : 0;
       std::vector<std::pair<uint8_t, bool>> configs = {
           {LOCATION_DECK, true},   {LOCATION_HAND, true},
           {LOCATION_MZONE, false}, {LOCATION_SZONE, false},
