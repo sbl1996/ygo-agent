@@ -343,7 +343,8 @@ class Encoder(nn.Module):
 
         mask = x_actions[:, :, 2] == 0  # msg == 0
         valid = x['global_'][:, -1] == 0
-        mask[:, 0] &= valid
+        mask[:, 0] = False
+        # mask[:, 0] &= valid
         for layer in self.action_card_net:
             f_actions = layer(
                 f_actions, f_cards[:, 1:], tgt_key_padding_mask=mask, memory_key_padding_mask=c_mask)

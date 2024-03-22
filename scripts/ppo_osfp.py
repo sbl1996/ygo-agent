@@ -69,7 +69,7 @@ class Args:
     """the number of parallel game environments"""
     num_steps: int = 128
     """the number of steps to run in each environment per policy rollout"""
-    anneal_lr: bool = True
+    anneal_lr: bool = False
     """Toggle learning rate annealing for policy and value networks"""
     gamma: float = 1.0
     """the discount factor gamma"""
@@ -329,21 +329,17 @@ def main():
     global_step = 0
     warmup_steps = 0
     start_time = time.time()
-    next_obs, info = envs.reset()
-    next_obs = to_tensor(next_obs, device, dtype=torch.uint8)
-    next_to_play_ = info["to_play"]
-    next_to_play = to_tensor(next_to_play_, device)
     next_done = torch.zeros(args.local_num_envs, device=device, dtype=torch.bool)
     ai_player1_ = np.concatenate([
         np.zeros(args.local_num_envs // 2, dtype=np.int64),
         np.ones(args.local_num_envs // 2, dtype=np.int64)
     ])
     np.random.shuffle(ai_player1_)
-    ai_player1 = to_tensor(ai_player1_, device, dtype=next_to_play.dtype)
+    ai_player1 = to_tensor(ai_player1_, device)
     next_value1 = next_value2 = 0
     step = 0
+    ts = []
     lp_count = 0
-    ts = sample_target(history)
 
     for iteration in range(args.num_iterations):
         # Annealing the rate if instructed to do so.
@@ -351,6 +347,15 @@ def main():
             frac = 1.0 - (iteration % args.iter_per_lp)  / args.iter_per_lp
             lrnow = frac * args.learning_rate
             optimizer.param_groups[0]["lr"] = lrnow
+        
+        if iteration % args.iter_per_lp == 0:
+            next_obs, info = envs.reset()
+            next_obs = to_tensor(next_obs, device, dtype=torch.uint8)
+            next_to_play_ = info["to_play"]
+            next_to_play = to_tensor(next_to_play_, device)
+            next_value1 = next_value2 = 0
+            step = 0
+            ts = []
 
         if len(ts) == 0:
             ts = sample_target(history)
@@ -538,7 +543,7 @@ def main():
         if (iteration + 1) % args.iter_per_lp == 0:
             lp_count += 1
             win_rates = sync_var(avg_win_rates, dtype=torch.float32, reduce='mean')
-            if np.all(win_rates > args.update_win_rate) or lp_count >= args.max_lp:
+            if len(history) == 0 or np.all(win_rates > args.update_win_rate) or lp_count >= args.max_lp:
                 agent_t.load_state_dict(agent.state_dict())
                 with torch.no_grad():
                     traced_model_t = torch.jit.trace(agent_t, (example_obs,), check_tolerance=False, check_trace=False)

@@ -41,7 +41,7 @@ class Args:
     """the language to use"""
     max_options: int = 24
     """the maximum number of options"""
-    n_history_actions: int = 16
+    n_history_actions: int = 32
     """the number of history actions to use"""
     num_embeddings: Optional[int] = None
     """the number of embeddings of the agent"""

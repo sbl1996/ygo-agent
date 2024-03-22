@@ -54,6 +54,20 @@ def train_step(agent, optimizer, scaler, mb_obs, mb_actions, mb_logprobs, mb_adv
     return old_approx_kl, approx_kl, clipfrac, pg_loss, v_loss, entropy_loss
 
 
+def bootstrap_value(values, rewards, dones, nextvalues, next_done, gamma, gae_lambda):
+    num_steps = rewards.size(0)
+    advantages = torch.zeros_like(rewards)
+    lastgaelam = 0
+    for t in reversed(range(num_steps)):
+        if t == num_steps - 1:
+            nextnonterminal = 1.0 - next_done
+            nextvalues = nextvalues
+        else:
+            nextnonterminal = 1.0 - dones[t + 1]
+            nextvalues = values[t + 1]
+        delta = rewards[t] + gamma * nextvalues * nextnonterminal - values[t]
+        advantages[t] = lastgaelam = delta + gamma * gae_lambda * nextnonterminal * lastgaelam
+
 
 def bootstrap_value_self(values, rewards, dones, learns, nextvalues, next_done, gamma, gae_lambda):
     num_steps = rewards.size(0)
