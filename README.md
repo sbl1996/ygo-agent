@@ -36,6 +36,7 @@ The following building instructions are only tested on Ubuntu (WSL2) and may not
 
 To build the project, you need to install the following prerequisites first:
 - gcc 10+ or clang 11+
+- CMake 3.12+
 - [xmake](https://xmake.io/#/getting_started)
 - PyTorch 2.0 or later with cuda support
 
