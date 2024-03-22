@@ -1409,7 +1409,7 @@ public:
         max_episode_steps_(spec.config["max_episode_steps"_]),
         elapsed_step_(max_episode_steps_ + 1), dist_int_(0, 0xffffffff),
         deck1_(spec.config["deck1"_]), deck2_(spec.config["deck2"_]),
-        player_(spec.config["player"_]),
+        player_(spec.config["player"_]), players_{nullptr, nullptr},
         play_modes_(parse_play_modes(spec.config["play_mode"_])),
         verbose_(spec.config["verbose"_]), record_(spec.config["record"_]),
         n_history_actions_(spec.config["n_history_actions"_]) {
