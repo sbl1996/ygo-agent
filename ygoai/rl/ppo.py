@@ -49,8 +49,11 @@ def train_step(agent, optimizer, scaler, mb_obs, mb_actions, mb_logprobs, mb_adv
     entropy_loss = masked_mean(entropy, valid)
     loss = pg_loss - args.ent_coef * entropy_loss + v_loss * args.vf_coef
     optimizer.zero_grad()
-    scaler.scale(loss).backward()
-    scaler.unscale_(optimizer)
+    if scaler is None:
+        loss.backward()
+    else:
+        scaler.scale(loss).backward()
+        scaler.unscale_(optimizer)
     return old_approx_kl, approx_kl, clipfrac, pg_loss, v_loss, entropy_loss
 
 

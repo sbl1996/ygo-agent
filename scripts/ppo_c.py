@@ -221,13 +221,8 @@ def actor(
         return logits, value
 
     if args.compile:
-        # It seems that using torch.compile twice cause segfault at start, so we use torch.jit.trace here
         predict_step = torch.compile(predict_step, mode=args.compile)
         agent_r = agent
-
-        # example_obs = create_obs(envs.observation_space, (args.local_num_envs,), device=device)
-        # with torch.no_grad():
-        #     agent_r = torch.jit.trace(agent, (example_obs,), check_tolerance=False, check_trace=False)
     else:
         agent_r = agent
 

@@ -135,6 +135,8 @@ class Args:
     """the number of iterations (computed in runtime)"""
     world_size: int = 0
     """the number of processes (computed in runtime)"""
+    num_embeddings: Optional[int] = None
+    """the number of embeddings (computed in runtime)"""
 
 
 def make_env(args, num_envs, num_threads, mode='self'):
@@ -148,7 +150,7 @@ def make_env(args, num_envs, num_threads, mode='self'):
         deck2=args.deck2,
         max_options=args.max_options,
         n_history_actions=args.n_history_actions,
-        play_mode='self',
+        play_mode=mode,
     )
     envs.num_envs = num_envs
     envs = RecordEpisodeStatistics(envs)
