@@ -3,7 +3,9 @@
 
 // clang-format off
 #include <algorithm>
+#include <cstdint>
 #include <cstdio>
+#include <ctime>
 #include <numeric>
 #include <stdexcept>
 #include <string>
@@ -21,11 +23,14 @@
 #include <ankerl/unordered_dense.h>
 #include <unordered_set>
 
+#include "BS_thread_pool.h"
+
 #include "ygoenv/core/async_envpool.h"
 #include "ygoenv/core/env.h"
 
 #include "ygopro-core/common.h"
 #include "ygopro-core/card_data.h"
+#include "ygopro-core/duel.h"
 #include "ygopro-core/ocgapi.h"
 
 // clang-format on
@@ -892,8 +897,18 @@ public:
   }
 };
 
-// TODO: 7% performance loss
-static std::shared_timed_mutex duel_mtx;
+struct MDuel {
+  intptr_t pduel;
+  uint64_t seed;
+  std::vector<CardCode> main_deck0;
+  std::vector<CardCode> extra_deck0;
+  std::string deck_name0;
+  std::vector<CardCode> main_deck1;
+  std::vector<CardCode> extra_deck1;
+  std::string deck_name1;
+};
+
+static std::mutex duel_mtx;
 
 inline Card db_query_card(const SQLite::Database &db, CardCode code) {
   SQLite::Statement query1(db, "SELECT * FROM datas WHERE id=?");
@@ -1237,7 +1252,7 @@ public:
                     "play_mode"_.Bind(std::string("bot")),
                     "verbose"_.Bind(false), "max_options"_.Bind(16),
                     "max_cards"_.Bind(80), "n_history_actions"_.Bind(16),
-                    "record"_.Bind(false));
+                    "record"_.Bind(false), "async_reset"_.Bind(true));
   }
   template <typename Config>
   static decltype(auto) StateSpec(const Config &conf) {
@@ -1301,6 +1316,10 @@ constexpr int32_t duel_options_ = ((rules_ & 0xFF) << 16) + (0 & 0xFFFF);
 
 class YGOProEnv : public Env<YGOProEnvSpec> {
 protected:
+  constexpr static int init_lp_ = 8000;
+  constexpr static int startcount_ = 5;
+  constexpr static int drawcount_ = 1;
+
   std::string deck1_;
   std::string deck2_;
   std::vector<uint32> main_deck0_;
@@ -1324,7 +1343,7 @@ protected:
 
   PlayerId ai_player_;
 
-  intptr_t pduel_;
+  intptr_t pduel_ = 0;
   Player *players_[2]; //  abstract class must be pointer
 
   std::uniform_int_distribution<uint64_t> dist_int_;
@@ -1365,6 +1384,9 @@ protected:
   uint64_t step_time_count_ = 0;
 
   double reset_time_ = 0;
+  double reset_time_1_ = 0;
+  double reset_time_2_ = 0;
+  double reset_time_3_ = 0;
   uint64_t reset_time_count_ = 0;
 
   const int n_history_actions_;
@@ -1403,6 +1425,14 @@ protected:
   // MSG_SELECT_COUNTER
   int n_counters_ = 0;
 
+  // async reset
+  const bool async_reset_;
+  int n_lives_ = 0;
+  std::future<MDuel> duel_fut_;
+  BS::thread_pool pool_;
+  std::mt19937 duel_gen_;
+
+
 public:
   YGOProEnv(const Spec &spec, int env_id)
       : Env<YGOProEnvSpec>(spec, env_id),
@@ -1412,13 +1442,21 @@ public:
         player_(spec.config["player"_]), players_{nullptr, nullptr},
         play_modes_(parse_play_modes(spec.config["play_mode"_])),
         verbose_(spec.config["verbose"_]), record_(spec.config["record"_]),
-        n_history_actions_(spec.config["n_history_actions"_]) {
+        n_history_actions_(spec.config["n_history_actions"_]), pool_(BS::thread_pool(1)),
+        async_reset_(spec.config["async_reset"_]) {
     if (record_) {
       if (!verbose_) {
         throw std::runtime_error("record mode must be used with verbose mode and num_envs=1");
       }
-      // replay_data_ = new uint8_t[MAX_REPLAY_SIZE];
-      // rdata_ = replay_data_;
+    }
+
+    duel_gen_ = std::mt19937(dist_int_(gen_));
+
+    if (async_reset_) {
+      duel_fut_ = pool_.submit_task([
+        this, duel_seed=dist_int_(gen_)] {
+        return new_duel(duel_seed);
+      });
     }
 
     int max_options = spec.config["max_options"_];
@@ -1452,8 +1490,36 @@ public:
            play_modes_.end();
   }
 
+  void update_time_stat(const clock_t& start, uint64_t time_count, double& time_stat) {
+    double seconds = static_cast<double>(clock() - start) / CLOCKS_PER_SEC;
+    time_stat = time_stat * (static_cast<double>(time_count) /
+      (time_count + 1)) + seconds / (time_count + 1);
+  }
+
+  MDuel new_duel(uint32_t seed) {
+    auto pduel = YGO_CreateDuel(seed);
+    MDuel mduel{pduel, seed};
+
+    for (PlayerId i = 0; i < 2; i++) {
+      YGO_SetPlayerInfo(pduel, i, init_lp_, startcount_, drawcount_);
+      auto [main_deck, extra_deck, deck_name] = load_deck(pduel, i, duel_gen_);
+      if (i == 0) {
+        mduel.main_deck0 = main_deck;
+        mduel.extra_deck0 = extra_deck;
+        mduel.deck_name0 = deck_name;
+      } else {
+        mduel.main_deck1 = main_deck;
+        mduel.extra_deck1 = extra_deck;
+        mduel.deck_name1 = deck_name;
+      }
+    }
+    YGO_StartDuel(pduel, duel_options_);
+    return mduel;
+  }
+
   void Reset() override {
-    // clock_t start = clock();
+    clock_t start = clock();
+
     if (random_mode()) {
       play_mode_ = play_modes_[dist_int_(gen_) % play_modes_.size()];
     } else {
@@ -1476,15 +1542,26 @@ public:
     ha_p_0_ = 0;
     ha_p_1_ = 0;
 
-    auto duel_seed = dist_int_(gen_);
+    clock_t _start = clock();
 
-    std::unique_lock<std::shared_timed_mutex> ulock(duel_mtx);
-    YGO_CreateDuel(duel_seed);
-    ulock.unlock();
+    intptr_t old_duel = pduel_;
+    MDuel mduel;
+    if (async_reset_) {
+      mduel = duel_fut_.get();
+      n_lives_ = 1;
+    } else {
+      mduel = new_duel(dist_int_(gen_));
+    }
 
-    int init_lp = 8000;
-    int startcount = 5;
-    int drawcount = 1;
+    auto duel_seed = mduel.seed;
+    pduel_ = mduel.pduel;
+
+    deck_name_[0] = mduel.deck_name0;
+    deck_name_[1] = mduel.deck_name1;
+    main_deck0_ = mduel.main_deck0;
+    extra_deck0_ = mduel.extra_deck0;
+    main_deck1_ = mduel.main_deck1;
+    extra_deck1_ = mduel.extra_deck1;
 
     for (PlayerId i = 0; i < 2; i++) {
       if (players_[i] != nullptr) {
@@ -1496,15 +1573,13 @@ public:
       }
       nickname_[i] = nickname;
       if ((play_mode_ == kHuman) && (i != ai_player_)) {
-        players_[i] = new HumanPlayer(nickname_[i], init_lp, i, verbose_);
+        players_[i] = new HumanPlayer(nickname_[i], init_lp_, i, verbose_);
       } else if (play_mode_ == kRandomBot) {
         players_[i] = new RandomAI(max_options(), dist_int_(gen_), nickname_[i],
-                                   init_lp, i, verbose_);
+                                   init_lp_, i, verbose_);
       } else {
-        players_[i] = new GreedyAI(nickname_[i], init_lp, i, verbose_);
+        players_[i] = new GreedyAI(nickname_[i], init_lp_, i, verbose_);
       }
-      YGO_SetPlayerInfo(pduel_, i, init_lp, startcount, drawcount);
-      load_deck(i);
       lp_[i] = players_[i]->init_lp_;
     }
 
@@ -1553,9 +1628,9 @@ public:
         fwrite(name, 40, 1, fp_);
       }
 
-      ReplayWriteInt32(init_lp);
-      ReplayWriteInt32(startcount);
-      ReplayWriteInt32(drawcount);
+      ReplayWriteInt32(init_lp_);
+      ReplayWriteInt32(startcount_);
+      ReplayWriteInt32(drawcount_);
       ReplayWriteInt32(duel_options_);
 
       for (PlayerId i = 0; i < 2; i++) {
@@ -1573,10 +1648,12 @@ public:
 
     }
 
-    YGO_StartDuel(pduel_, duel_options_);
     duel_started_ = true;
     winner_ = 255;
     win_reason_ = 255;
+
+    // update_time_stat(_start, reset_time_count_, reset_time_2_);
+    // _start = clock();
 
     next();
 
@@ -1584,13 +1661,21 @@ public:
     elapsed_step_ = 0;
     WriteState(0.0);
 
-    // double seconds = static_cast<double>(clock() - start) / CLOCKS_PER_SEC;
-    // // update reset_time by moving average
-    // reset_time_ = reset_time_* (static_cast<double>(reset_time_count_) /
-    // (reset_time_count_ + 1)) + seconds / (reset_time_count_ + 1);
+    if (async_reset_) {
+      duel_fut_ = pool_.submit_task([
+        this, old_duel, duel_seed=dist_int_(gen_)] {
+        if (old_duel != 0) {
+          YGO_EndDuel(old_duel);
+        }
+        return new_duel(duel_seed);
+      });
+    }
+    // update_time_stat(_start, reset_time_count_, reset_time_3_);
+
+    // update_time_stat(start, reset_time_count_, reset_time_);
     // reset_time_count_++;
     // if (reset_time_count_ % 20 == 0) {
-    //   fmt::println("Reset time: {:.3f}", reset_time_);
+    //   fmt::println("Reset time: {:.3f}, {:.3f}, {:.3f}", reset_time_ * 1000, reset_time_2_ * 1000, reset_time_3_ * 1000);
     // }
   }
 
@@ -1617,7 +1702,7 @@ public:
         options_.push_back(spec);
       }
     } else {
-        ms_combs_ = combs;
+      ms_combs_ = combs;
       _callback_multi_select_2_prepare();
     }
   }
@@ -1854,13 +1939,10 @@ public:
 
     WriteState(reward, win_reason_);
 
-    // double seconds = static_cast<double>(clock() - start) / CLOCKS_PER_SEC;
-    // // update step_time by moving average
-    // step_time_ = step_time_* (static_cast<double>(step_time_count_) /
-    // (step_time_count_ + 1)) + seconds / (step_time_count_ + 1);
+    // update_time_stat(start, step_time_count_, step_time_);
     // step_time_count_++;
-    // if (step_time_count_ % 500 == 0) {
-    //   fmt::println("Step time: {:.3f}", step_time_);
+    // if (step_time_count_ % 3000 == 0) {
+    //   fmt::println("Step time: {:.3f}", step_time_ * 1000);
     // }
   }
 
@@ -2210,25 +2292,30 @@ private:
   }
 
   // ygopro-core API
-  void YGO_CreateDuel(uint32_t seed) {
+  intptr_t YGO_CreateDuel(uint32_t seed) {
     std::mt19937 rnd(seed);
-    pduel_ =  create_duel(rnd());
+    // return create_duel(rnd());
+    duel* pduel = new duel();
+    pduel->random.reset(rnd());
+    return (intptr_t)pduel;
   }
 
-  void YGO_SetPlayerInfo(intptr_t pduel, int32 playerid, int32 lp, int32 startcount, int32 drawcount) {
+  void YGO_SetPlayerInfo(intptr_t pduel, int32 playerid, int32 lp, int32 startcount, int32 drawcount) const {
     set_player_info(pduel, playerid, lp, startcount, drawcount);
   }
 
-  void YGO_NewCard(intptr_t pduel, uint32 code, uint8 owner, uint8 playerid, uint8 location, uint8 sequence, uint8 position) {
+  void YGO_NewCard(intptr_t pduel, uint32 code, uint8 owner, uint8 playerid, uint8 location, uint8 sequence, uint8 position) const {
     new_card(pduel, code, owner, playerid, location, sequence, position);
   }
 
-  void YGO_StartDuel(intptr_t pduel, int32 options) {
+  void YGO_StartDuel(intptr_t pduel, int32 options) const {
     start_duel(pduel, options);
   }
 
-  void YGO_EndDuel(intptr_t pduel) {
-    end_duel(pduel);
+  void YGO_EndDuel(intptr_t pduel) const {
+    // end_duel(pduel);
+    duel* pd = (duel*)pduel;
+    delete pd;
   }
 
   int32 YGO_GetMessage(intptr_t pduel, byte* buf) {
@@ -2355,47 +2442,45 @@ private:
                  options_);
   }
 
-  void load_deck(PlayerId player, bool shuffle = true) {
-    std::string deck = player == 0 ? deck1_ : deck2_;
-    std::vector<CardCode> &main_deck = player == 0 ? main_deck0_ : main_deck1_;
-    std::vector<CardCode> &extra_deck =
-        player == 0 ? extra_deck0_ : extra_deck1_;
+  std::tuple<std::vector<CardCode>, std::vector<CardCode>, std::string>
+  load_deck(
+    intptr_t pduel, PlayerId player, std::mt19937& gen, bool shuffle = true) const {
+    std::string deck_name = player == 0 ? deck1_ : deck2_;
 
-    if (deck == "random") {
+    if (deck_name == "random") {
       // generate random deck name
       std::uniform_int_distribution<uint64_t> dist_int(0,
                                                        deck_names_.size() - 1);
-      deck_name_[player] = deck_names_[dist_int(gen_)];
-    } else {
-      deck_name_[player] = deck;
+      deck_name = deck_names_[dist_int(gen)];
     }
-    deck = deck_name_[player];
 
-    main_deck = main_decks_.at(deck);
-    extra_deck = extra_decks_.at(deck);
+    std::vector<CardCode> main_deck = main_decks_.at(deck_name);
+    std::vector<CardCode> extra_deck = extra_decks_.at(deck_name);
 
     if (verbose_) {
       fmt::println("{} {}: {}, main({}), extra({})", player, nickname_[player],
-        deck, main_deck.size(), extra_deck.size());
+        deck_name, main_deck.size(), extra_deck.size());
     }
 
     if (shuffle) {
-      std::shuffle(main_deck.begin(), main_deck.end(), gen_);
+      std::shuffle(main_deck.begin(), main_deck.end(), gen);
     }
 
     // add main deck in reverse order following ygopro
     // but since we have shuffled deck, so just add in order
 
     for (int i = 0; i < main_deck.size(); i++) {
-      YGO_NewCard(pduel_, main_deck[i], player, player, LOCATION_DECK, 0,
+      YGO_NewCard(pduel, main_deck[i], player, player, LOCATION_DECK, 0,
                POS_FACEDOWN_DEFENSE);
     }
 
     // add extra deck in reverse order following ygopro
     for (int i = int(extra_deck.size()) - 1; i >= 0; --i) {
-      YGO_NewCard(pduel_, extra_deck[i], player, player, LOCATION_EXTRA, 0,
+      YGO_NewCard(pduel, extra_deck[i], player, player, LOCATION_EXTRA, 0,
                POS_FACEDOWN_DEFENSE);
     }
+
+    return {main_deck, extra_deck, deck_name};
   }
 
   void next() {
@@ -4573,10 +4658,11 @@ private:
   void _duel_end(uint8_t player, uint8_t reason) {
     winner_ = player;
     win_reason_ = reason;
-
-    std::unique_lock<std::shared_timed_mutex> ulock(duel_mtx);
-    YGO_EndDuel(pduel_);
-    ulock.unlock();
+    if (async_reset_) {
+      n_lives_--;
+    } else {
+      YGO_EndDuel(pduel_);
+    }
 
     duel_started_ = false;
   }

@@ -632,6 +632,7 @@ class EncoderLayer(nn.Module):
 
     @nn.compact
     def __call__(self, inputs, src_key_padding_mask=None):
+        inputs = jnp.asarray(inputs, self.dtype)
         x = nn.LayerNorm(epsilon=self.layer_norm_epsilon,
                          dtype=self.dtype, name="ln_1")(inputs)
         x = MultiheadAttention(

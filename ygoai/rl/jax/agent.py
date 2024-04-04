@@ -5,54 +5,13 @@ import jax
 import jax.numpy as jnp
 import flax.linen as nn
 
+from ygoai.rl.jax.modules import MLP, make_bin_params, bytes_to_bin, decode_id
 from ygoai.rl.jax.transformer import EncoderLayer, DecoderLayer, PositionalEncoding
 
 
-def decode_id(x):
-    x = x[..., 0] * 256 + x[..., 1]
-    return x
-
-
-def bytes_to_bin(x, points, intervals):
-    points = points.astype(x.dtype)
-    intervals = intervals.astype(x.dtype)
-    x = decode_id(x)
-    x = jnp.expand_dims(x, -1)
-    return jnp.clip((x - points + intervals) / intervals, 0, 1)
-
-
-def make_bin_params(x_max=32000, n_bins=32, sig_bins=24):
-    x_max1 = 8000
-    x_max2 = x_max
-    points1 = jnp.linspace(0, x_max1, sig_bins + 1, dtype=jnp.float32)[1:]
-    points2 = jnp.linspace(x_max1, x_max2, n_bins - sig_bins + 1, dtype=jnp.float32)[1:]
-    points = jnp.concatenate([points1, points2], axis=0)
-    intervals = jnp.concatenate([points[0:1], points[1:] - points[:-1]], axis=0)
-    return points, intervals
-
-
-default_embed_init = nn.initializers.uniform(scale=0.0001)
+default_embed_init = nn.initializers.uniform(scale=0.001)
 default_fc_init1 = nn.initializers.uniform(scale=0.001)
-default_fc_init2 = nn.initializers.uniform(scale=0.0001)
-
-
-class MLP(nn.Module):
-    features: Tuple[int, ...] = (128, 128)
-    last_lin: bool = True
-    dtype: Optional[jnp.dtype] = None
-    param_dtype: jnp.dtype = jnp.float32
-    kernel_init: nn.initializers.Initializer = nn.initializers.lecun_normal()
-    
-    @nn.compact
-    def __call__(self, x):
-        n = len(self.features)
-        for i, c in enumerate(self.features):
-            x = nn.Dense(
-                c, dtype=self.dtype, param_dtype=self.param_dtype,
-                kernel_init=self.kernel_init, use_bias=False)(x)
-            if i < n - 1 or not self.last_lin:
-                x = nn.relu(x)
-        return x
+default_fc_init2 = nn.initializers.uniform(scale=0.001)
 
 
 class ActionEncoder(nn.Module):
@@ -105,18 +64,19 @@ class Encoder(nn.Module):
 
         layer_norm = partial(nn.LayerNorm, use_scale=False, use_bias=False)
         embed = partial(
-            nn.Embed, dtype=self.dtype, param_dtype=self.param_dtype, embedding_init=default_embed_init)
-        fc_layer = partial(nn.Dense, use_bias=False, dtype=self.dtype, param_dtype=self.param_dtype)
+            nn.Embed, dtype=jnp.float32, param_dtype=self.param_dtype, embedding_init=default_embed_init)
+        fc_embed = partial(nn.Dense, use_bias=False, dtype=jnp.float32, param_dtype=self.param_dtype)
+        fc_layer = partial(nn.Dense, use_bias=False, dtype=jnp.float32, param_dtype=self.param_dtype)
         
         id_embed = embed(n_embed, embed_dim)
         count_embed = embed(100, c // 16)
         hand_count_embed = embed(100, c // 16)
         
-        num_fc = MLP((c // 8,), last_lin=False, dtype=self.dtype, param_dtype=self.param_dtype)
+        num_fc = MLP((c // 8,), last_lin=False, dtype=jnp.float32, param_dtype=self.param_dtype)
         bin_points, bin_intervals = make_bin_params(n_bins=32)
         num_transform = lambda x: num_fc(bytes_to_bin(x, bin_points, bin_intervals))
         
-        action_encoder = ActionEncoder(channels=c, dtype=self.dtype, param_dtype=self.param_dtype)
+        action_encoder = ActionEncoder(channels=c, dtype=jnp.float32, param_dtype=self.param_dtype)
         x_cards = x['cards_']
         x_global = x['global_']
         x_actions = x['actions_']
@@ -125,12 +85,12 @@ class Encoder(nn.Module):
         valid = x_global[:, -1] == 0
         
         x_cards_1 = x_cards[:, :, :12].astype(jnp.int32)
-        x_cards_2 = x_cards[:, :, 12:].astype(self.dtype or jnp.float32)
+        x_cards_2 = x_cards[:, :, 12:].astype(jnp.float32)
         
         x_id = decode_id(x_cards_1[:, :, :2])
         x_id = id_embed(x_id)
         x_id = MLP(
-            (c, c // 4), dtype=self.dtype, param_dtype=self.param_dtype,
+            (c, c // 4), dtype=jnp.float32, param_dtype=self.param_dtype,
             kernel_init=default_fc_init2)(x_id)
         x_id = layer_norm()(x_id)
         
@@ -152,10 +112,10 @@ class Encoder(nn.Module):
         x_negated = embed(3, c // 16)(x_cards_1[:, :, 11])
         
         x_atk = num_transform(x_cards_2[:, :, 0:2])
-        x_atk = fc_layer(c // 16, kernel_init=default_fc_init1)(x_atk)
+        x_atk = fc_embed(c // 16, kernel_init=default_fc_init1)(x_atk)
         x_def = num_transform(x_cards_2[:, :, 2:4])
-        x_def = fc_layer(c // 16, kernel_init=default_fc_init1)(x_def)
-        x_type = fc_layer(c // 16 * 2, kernel_init=default_fc_init2)(x_cards_2[:, :, 4:])
+        x_def = fc_embed(c // 16, kernel_init=default_fc_init1)(x_def)
+        x_type = fc_embed(c // 16 * 2, kernel_init=default_fc_init2)(x_cards_2[:, :, 4:])
 
         x_feat = jnp.concatenate([
             x_owner, x_position, x_overley, x_attribute,
@@ -173,14 +133,14 @@ class Encoder(nn.Module):
             'na_card_embed',
             lambda key, shape, dtype: jax.random.normal(key, shape, dtype) * 0.02,
             (1, c), self.param_dtype)
-        f_na_card = jnp.tile(na_card_embed, (batch_size, 1, 1))
+        f_na_card = jnp.tile(na_card_embed, (batch_size, 1, 1)).astype(f_cards.dtype)
         f_cards = jnp.concatenate([f_na_card, f_cards], axis=1)
         c_mask = jnp.concatenate([jnp.zeros((batch_size, 1), dtype=c_mask.dtype), c_mask], axis=1)
         f_cards = layer_norm()(f_cards)
         
-        x_global_1 = x_global[:, :4].astype(self.dtype or jnp.float32)
-        x_g_lp = fc_layer(c // 4, kernel_init=default_fc_init2)(num_transform(x_global_1[:, 0:2]))
-        x_g_oppo_lp = fc_layer(c // 4, kernel_init=default_fc_init2)(num_transform(x_global_1[:, 2:4]))
+        x_global_1 = x_global[:, :4].astype(jnp.float32)
+        x_g_lp = fc_embed(c // 4, kernel_init=default_fc_init2)(num_transform(x_global_1[:, 0:2]))
+        x_g_oppo_lp = fc_embed(c // 4, kernel_init=default_fc_init2)(num_transform(x_global_1[:, 2:4]))
         
         x_global_2 = x_global[:, 4:8].astype(jnp.int32)
         x_g_turn = embed(20, c // 8)(x_global_2[:, 0])
@@ -197,7 +157,7 @@ class Encoder(nn.Module):
             x_g_lp, x_g_oppo_lp, x_g_turn, x_g_phase, x_g_if_first, x_g_is_my_turn,
             x_g_cs, x_g_my_hand_c, x_g_op_hand_c], axis=-1)
         x_global = layer_norm()(x_global)
-        f_global = x_global + MLP((c * 2, c * 2), dtype=self.dtype, param_dtype=self.param_dtype)(x_global)
+        f_global = x_global + MLP((c * 2, c * 2), dtype=jnp.float32, param_dtype=self.param_dtype)(x_global)
         f_global = fc_layer(c)(f_global)
         f_global = layer_norm()(f_global)
         
@@ -220,14 +180,14 @@ class Encoder(nn.Module):
                 f_actions, f_cards,
                 tgt_key_padding_mask=a_mask,
                 memory_key_padding_mask=c_mask)
-        
+
         x_h_actions = x['h_actions_'].astype(jnp.int32)
         h_mask = x_h_actions[:, :, 2] == 0  # msg == 0
         h_mask = h_mask.at[:, 0].set(False)
 
         x_h_id = decode_id(x_h_actions[..., :2])
         x_h_id = MLP(
-            (c, c), dtype=self.dtype, param_dtype=self.param_dtype,
+            (c, c), dtype=jnp.float32, param_dtype=self.param_dtype,
             kernel_init=default_fc_init2)(id_embed(x_h_id))
 
         x_h_a_feats = action_encoder(x_h_actions[:, :, 2:])
@@ -237,9 +197,9 @@ class Encoder(nn.Module):
         for _ in range(self.num_action_layers):
             f_h_actions = EncoderLayer(num_heads, dtype=self.dtype, param_dtype=self.param_dtype)(
                 f_h_actions, src_key_padding_mask=h_mask)
-        
+
         for _ in range(self.num_action_layers):
-            f_actions = DecoderLayer(num_heads, dtype=self.dtype, param_dtype=self.param_dtype)(
+            f_actions = DecoderLayer(num_heads, dtype=jnp.float32, param_dtype=self.param_dtype)(
                 f_actions, f_h_actions,
                 tgt_key_padding_mask=a_mask,
                 memory_key_padding_mask=h_mask)
@@ -261,11 +221,12 @@ class Actor(nn.Module):
     @nn.compact
     def __call__(self, f_actions, mask):
         c = self.channels
+        mlp = partial(MLP, dtype=jnp.float32, param_dtype=self.param_dtype, last_kernel_init=nn.initializers.orthogonal(0.01))
         num_heads = max(2, c // 128)
         f_actions = EncoderLayer(
-            num_heads, dtype=self.dtype, param_dtype=self.param_dtype)(f_actions, src_key_padding_mask=mask)
-        logits = MLP((c // 4, 1), dtype=self.dtype, param_dtype=self.param_dtype)(f_actions)
-        logits = logits[..., 0].astype(jnp.float32)
+            num_heads, dtype=jnp.float32, param_dtype=self.param_dtype)(f_actions, src_key_padding_mask=mask)
+        logits = mlp((c // 4, 1), use_bias=True)(f_actions)
+        logits = logits[..., 0]
         big_neg = jnp.finfo(logits.dtype).min
         logits = jnp.where(mask, big_neg, logits)
         return logits
@@ -279,8 +240,8 @@ class Critic(nn.Module):
     @nn.compact
     def __call__(self, f_state):
         c = self.channels
-        x = MLP((c // 2, 1), dtype=self.dtype, param_dtype=self.param_dtype)(f_state)
-        x = x.astype(jnp.float32)
+        mlp = partial(MLP, dtype=jnp.float32, param_dtype=self.param_dtype, last_kernel_init=nn.initializers.orthogonal(1.0))
+        x = MLP((c // 2, 1), use_bias=True)(f_state)
         return x
 
 

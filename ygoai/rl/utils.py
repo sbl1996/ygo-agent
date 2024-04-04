@@ -55,7 +55,7 @@ def masked_normalize(x, valid, eps=1e-8):
     return (x - mean) / std
 
 
-def to_tensor(x, device, dtype=torch.float32):
+def to_tensor(x, device, dtype=None):
     return optree.tree_map(lambda x: torch.from_numpy(x).to(device=device, dtype=dtype, non_blocking=True), x)
 
 
