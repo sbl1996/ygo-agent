@@ -25,7 +25,7 @@ from ygoai.utils import init_ygopro
 from ygoai.rl.jax.agent2 import PPOLSTMAgent
 from ygoai.rl.jax.utils import RecordEpisodeStatistics, masked_mean, masked_normalize
 from ygoai.rl.jax.eval import evaluate
-from ygoai.rl.jax import compute_gae_upgo2, compute_gae2
+from ygoai.rl.jax import compute_gae_upgo_2p0s, compute_gae_2p0s
 
 
 os.environ["XLA_FLAGS"] = "--xla_cpu_multi_thread_eigen=false intra_op_parallelism_threads=1"
@@ -105,8 +105,8 @@ class Args:
     """the number of layers for the agent"""
     num_channels: int = 128
     """the number of channels for the agent"""
-    lstm_channels: int = 512
-    """the number of channels for the LSTM in the agent"""
+    rnn_channels: int = 512
+    """the number of channels for the RNN in the agent"""
 
     actor_device_ids: List[int] = field(default_factory=lambda: [0, 1])
     """the device ids that actor workers will use"""
@@ -170,7 +170,7 @@ class Transition(NamedTuple):
     actions: list
     logprobs: list
     rewards: list
-    learns: list
+    mains: list
     probs: list
 
 
@@ -181,15 +181,15 @@ def create_agent(args, multi_step=False):
         embedding_shape=args.num_embeddings,
         dtype=jnp.bfloat16 if args.bfloat16 else jnp.float32,
         param_dtype=jnp.float32,
-        lstm_channels=args.lstm_channels,
+        lstm_channels=args.rnn_channels,
         multi_step=multi_step,
     )
 
 
-def init_carry(num_envs, lstm_channels):
+def init_rnn_state(num_envs, rnn_channels):
     return (
-        np.zeros((num_envs, lstm_channels)),
-        np.zeros((num_envs, lstm_channels)),
+        np.zeros((num_envs, rnn_channels)),
+        np.zeros((num_envs, rnn_channels)),
     )
 
 
@@ -231,29 +231,29 @@ def rollout(
     @jax.jit
     def get_logits(
         params: flax.core.FrozenDict, inputs, done):
-        carry, logits = create_agent(args).apply(params, inputs)[:2]
-        carry = jax.tree.map(lambda x: jnp.where(done[:, None], 0, x), carry)
-        return carry, logits
+        rstate, logits = create_agent(args).apply(params, inputs)[:2]
+        rstate = jax.tree.map(lambda x: jnp.where(done[:, None], 0, x), rstate)
+        return rstate, logits
 
     @jax.jit
     def get_action(
         params: flax.core.FrozenDict, inputs):
         batch_size = jax.tree.leaves(inputs)[0].shape[0]
         done = jnp.zeros(batch_size, dtype=jnp.bool_)
-        carry, logits = get_logits(params, inputs, done)
-        return carry, logits.argmax(axis=1)
+        rstate, logits = get_logits(params, inputs, done)
+        return rstate, logits.argmax(axis=1)
 
     @jax.jit
     def sample_action(
         params: flax.core.FrozenDict,
-        next_obs, carry1, carry2, learn, done, key):
+        next_obs, rstate1, rstate2, main, done, key):
         next_obs = jax.tree.map(lambda x: jnp.array(x), next_obs)
-        learn = jnp.array(learn)
-        carry = jax.tree.map(
-            lambda x1, x2: jnp.where(learn[:, None], x1, x2), carry1, carry2)
-        carry, logits = get_logits(params, (carry, next_obs), done)
-        carry1 = jax.tree.map(lambda x, y: jnp.where(learn[:, None], x, y), carry, carry1)
-        carry2 = jax.tree.map(lambda x, y: jnp.where(learn[:, None], y, x), carry, carry2)
+        main = jnp.array(main)
+        rstate = jax.tree.map(
+            lambda x1, x2: jnp.where(main[:, None], x1, x2), rstate1, rstate2)
+        rstate, logits = get_logits(params, (rstate, next_obs), done)
+        rstate1 = jax.tree.map(lambda x, y: jnp.where(main[:, None], x, y), rstate, rstate1)
+        rstate2 = jax.tree.map(lambda x, y: jnp.where(main[:, None], y, x), rstate, rstate2)
 
         # sample action: Gumbel-softmax trick
         # see https://stats.stackexchange.com/questions/359442/sampling-from-a-categorical-distribution
@@ -265,7 +265,7 @@ def rollout(
         logits = logits - jax.scipy.special.logsumexp(logits, axis=-1, keepdims=True)
         logits = logits.clip(min=jnp.finfo(logits.dtype).min)
         probs = jax.nn.softmax(logits)
-        return next_obs, carry1, carry2, action, logprob, probs, key
+        return next_obs, rstate1, rstate2, action, logprob, probs, key
 
     # put data in the last index
     params_queue_get_time = deque(maxlen=10)
@@ -274,15 +274,15 @@ def rollout(
     next_obs, info = envs.reset()
     next_to_play = info["to_play"]
     next_done = np.zeros(args.local_num_envs, dtype=np.bool_)
-    next_lstm_state1 = next_lstm_state2 = init_carry(
-        args.local_num_envs, args.lstm_channels)
-    eval_rnn_state = init_carry(
-        args.local_eval_episodes, args.lstm_channels)
-    ai_player1 = np.concatenate([
+    next_rstate1 = next_rstate2 = init_rnn_state(
+        args.local_num_envs, args.rnn_channels)
+    eval_rstate = init_rnn_state(
+        args.local_eval_episodes, args.rnn_channels)
+    main_player = np.concatenate([
         np.zeros(args.local_num_envs // 2, dtype=np.int64),
         np.ones(args.local_num_envs // 2, dtype=np.int64)
     ])
-    np.random.shuffle(ai_player1)
+    np.random.shuffle(main_player)
     start_step = 0
     storage = []
 
@@ -312,18 +312,18 @@ def rollout(
         params_queue_get_time.append(time.time() - params_queue_get_time_start)
 
         rollout_time_start = time.time()
-        initial_lstm_state1, initial_lstm_state2 = jax.tree.map(
-            lambda x: x.copy(), (next_lstm_state1, next_lstm_state2))
+        initial_rstate1, initial_rstate2 = jax.tree.map(
+            lambda x: x.copy(), (next_rstate1, next_rstate2))
         for _ in range(start_step, args.collect_length):
             global_step += args.local_num_envs * n_actors * args.world_size
 
             cached_next_obs = next_obs
             cached_next_done = next_done
-            learn = next_to_play == ai_player1
+            main = next_to_play == main_player
 
             inference_time_start = time.time()
-            cached_next_obs, next_lstm_state1, next_lstm_state2, action, logprob, probs, key = sample_action(
-                params, cached_next_obs, next_lstm_state1, next_lstm_state2, learn, cached_next_done, key)
+            cached_next_obs, next_rstate1, next_rstate2, action, logprob, probs, key = sample_action(
+                params, cached_next_obs, next_rstate1, next_rstate2, main, cached_next_done, key)
             
             cpu_action = np.array(action)
             inference_time += time.time() - inference_time_start
@@ -341,7 +341,7 @@ def rollout(
                     actions=action,
                     logprobs=logprob,
                     rewards=next_reward,
-                    learns=learn,
+                    mains=main,
                     probs=probs,
                 )
             )
@@ -349,17 +349,17 @@ def rollout(
             for idx, d in enumerate(next_done):
                 if not d:
                     continue
-                cur_learn = learn[idx]
+                cur_main = main[idx]
                 for j in reversed(range(len(storage) - 1)):
                     t = storage[j]
                     if t.dones[idx]:
                         # For OTK where player may not switch
                         break
-                    if t.learns[idx] != cur_learn:
+                    if t.mains[idx] != cur_main:
                         t.dones[idx] = True
                         t.rewards[idx] = -next_reward[idx]
                         break
-                pl = 1 if to_play[idx] == ai_player1[idx] else -1
+                pl = 1 if to_play[idx] == main_player[idx] else -1
                 episode_reward = info['r'][idx] * pl
                 win = 1 if episode_reward > 0 else 0
                 avg_ep_returns.append(episode_reward)
@@ -382,16 +382,18 @@ def rollout(
                 x = jax.device_put_sharded(x, devices=learner_devices)
             sharded_storage.append(x)
         sharded_storage = Transition(*sharded_storage)
-        next_learn = ai_player1 == next_to_play
-        next_lstm_state = jax.tree.map(
-            lambda x1, x2: jnp.where(next_learn[:, None], x1, x2), next_lstm_state1, next_lstm_state2)
-        carry1 = jax.tree.map(
-            lambda x, y: jnp.where(next_learn[:, None], x, y), initial_lstm_state1, initial_lstm_state2)
-        carry2 = jax.tree.map(
-            lambda x, y: jnp.where(next_learn[:, None], y, x), initial_lstm_state1, initial_lstm_state2)
+        next_main = main_player == next_to_play
+        next_rstate = jax.tree.map(
+            lambda x1, x2: jnp.where(next_main[:, None], x1, x2), next_rstate1, next_rstate2)
+        # initial_rstate1: main, initial_rstate2: opponent
+        # init rstate1: == next_main, init rstate2: != next_main
+        init_rstate1 = jax.tree.map(
+            lambda x, y: jnp.where(next_main[:, None], x, y), initial_rstate1, initial_rstate2)
+        init_rstate2 = jax.tree.map(
+            lambda x, y: jnp.where(next_main[:, None], y, x), initial_rstate1, initial_rstate2)
         sharded_data = jax.tree.map(lambda x: jax.device_put_sharded(
                 np.split(x, len(learner_devices)), devices=learner_devices),
-                         (next_obs, next_lstm_state, carry1, carry2, next_done, next_learn))
+                         (next_obs, next_rstate, init_rstate1, init_rstate2, next_done, next_main))
         payload = (
             global_step,
             actor_policy_version,
@@ -426,7 +428,7 @@ def rollout(
         if args.eval_interval and update % args.eval_interval == 0:
             # Eval with rule-based policy
             _start = time.time()
-            eval_return = evaluate(eval_envs, get_action, params, eval_rnn_state)[0]
+            eval_return = evaluate(eval_envs, get_action, params, eval_rstate)[0]
             if device_thread_id != 0:
                 stats_queue.put(eval_return)
             else:
@@ -521,9 +523,9 @@ if __name__ == "__main__":
         frac = 1.0 - (count // (args.num_minibatches * args.update_epochs)) / args.num_updates
         return args.learning_rate * frac
 
-    carry = init_carry(1, args.lstm_channels)
+    rstate = init_rnn_state(1, args.rnn_channels)
     agent = create_agent(args)
-    params = agent.init(agent_key, (carry, sample_obs))
+    params = agent.init(agent_key, (rstate, sample_obs))
     tx = optax.MultiSteps(
         optax.chain(
             optax.clip_by_global_norm(args.max_grad_norm),
@@ -551,7 +553,7 @@ if __name__ == "__main__":
     def get_logprob_entropy_value(
         params: flax.core.FrozenDict, inputs, actions,
     ):
-        _carry, logits, value, valid = create_agent(
+        rstate, logits, value, valid = create_agent(
             args, multi_step=True).apply(params, inputs)
         logprob = jax.nn.log_softmax(logits)[jnp.arange(actions.shape[0]), actions]
 
@@ -603,17 +605,17 @@ if __name__ == "__main__":
         agent_state: TrainState,
         sharded_storages: List,
         sharded_next_obs: List,
-        sharded_next_carry: List,
-        sharded_carry1: List,
-        sharded_carry2: List,
+        sharded_next_rstate: List,
+        sharded_init_rstate1: List,
+        sharded_init_rstate2: List,
         sharded_next_done: List,
-        sharded_next_learn: List,
+        sharded_next_main: List,
         key: jax.random.PRNGKey,
     ):
-        def reshape_minibatch(x, num_minibatches, num_steps=1):
+        def reshape_minibatch(x, num_minibatches, multi_step=False):
             N = num_minibatches
-            if num_steps > 1:
-                x = jnp.reshape(x, (num_steps, N, -1) + x.shape[2:])
+            if multi_step:
+                x = jnp.reshape(x, (args.num_steps, N, -1) + x.shape[2:])
                 x = x.transpose(1, 0, *range(2, x.ndim))
                 x = x.reshape(N, -1, *x.shape[3:])
             else:
@@ -621,32 +623,32 @@ if __name__ == "__main__":
             return x
 
         storage = jax.tree.map(lambda *x: jnp.hstack(x), *sharded_storages)
-        next_obs = jax.tree.map(lambda *x: jnp.concatenate(x), *sharded_next_obs)
-        next_carry = jax.tree.map(lambda *x: jnp.concatenate(x), *sharded_next_carry)
-        carry1 = jax.tree.map(lambda *x: jnp.concatenate(x), *sharded_carry1)
-        carry2 = jax.tree.map(lambda *x: jnp.concatenate(x), *sharded_carry2)
-        next_done, next_learn = [
-            jnp.concatenate(x) for x in [sharded_next_done, sharded_next_learn]
+        next_obs, next_rstate, init_rstate1, init_rstate2 = [
+            jax.tree.map(lambda *x: jnp.concatenate(x), *x)
+            for x in [sharded_next_obs, sharded_next_rstate, sharded_init_rstate1, sharded_init_rstate2]
+        ]
+        next_done, next_main = [
+            jnp.concatenate(x) for x in [sharded_next_done, sharded_next_main]
         ]
 
         # reorder storage of individual players
         num_steps, num_envs = storage.rewards.shape
         T = jnp.arange(num_steps, dtype=jnp.int32)
         B = jnp.arange(num_envs, dtype=jnp.int32)
-        learns = (storage.learns == next_learn).astype(jnp.int32)
-        indices = jnp.argsort(T[:, None] + learns * num_steps, axis=0)
-        switch = T[:, None] == (num_steps - 1 - jnp.sum(learns, axis=0))
+        mains = (storage.mains == next_main).astype(jnp.int32)
+        indices = jnp.argsort(T[:, None] + mains * num_steps, axis=0)
+        switch = T[:, None] == (num_steps - 1 - jnp.sum(mains, axis=0))
         storage = jax.tree.map(lambda x: x[indices, B[None, :]], storage)
 
         # split minibatches for recompute values
         n_mbs = args.num_minibatches // 4
-        flatten_carry = jax.tree.map(
+        split_init_rstate = jax.tree.map(
             partial(reshape_minibatch, num_minibatches=n_mbs),
-            (carry1, carry2))
-        flatten_inputs = jax.tree.map(
-            partial(reshape_minibatch, num_minibatches=n_mbs, num_steps=args.num_steps),
+            (init_rstate1, init_rstate2))
+        split_inputs = jax.tree.map(
+            partial(reshape_minibatch, num_minibatches=n_mbs, multi_step=True),
             (storage.obs, storage.dones, switch))
-        flatten_inputs = flatten_carry + flatten_inputs
+        split_inputs = split_init_rstate + split_inputs
 
         ppo_loss_grad_fn = jax.value_and_grad(ppo_loss, has_aux=True)
 
@@ -660,28 +662,28 @@ if __name__ == "__main__":
                 return agent_state, values
 
             _, values = jax.lax.scan(
-                get_value_minibatch, agent_state, flatten_inputs)
+                get_value_minibatch, agent_state, split_inputs)
             values = values.reshape((n_mbs, args.num_steps, -1)).transpose(1, 0, 2)
             values = values.reshape(storage.rewards.shape)
 
             next_value = create_agent(args).apply(
-                agent_state.params, (next_carry, next_obs))[2].squeeze(-1)
+                agent_state.params, (next_rstate, next_obs))[2].squeeze(-1)
 
-            compute_gae_fn = compute_gae_upgo2 if args.upgo else compute_gae2
+            compute_gae_fn = compute_gae_upgo_2p0s if args.upgo else compute_gae_2p0s
             advantages, target_values = compute_gae_fn(
                 next_value, next_done, values, storage.rewards, storage.dones, switch,
                 args.gamma, args.gae_lambda)
             advantages = advantages[:args.num_steps]
             target_values = target_values[:args.num_steps]
 
-            def convert_data(x: jnp.ndarray, num_steps=1):
+            def convert_data(x: jnp.ndarray, multi_step):
                 x = jax.random.permutation(subkey, x, axis=1)
-                return reshape_minibatch(x, args.num_minibatches, num_steps)
+                return reshape_minibatch(x, args.num_minibatches, multi_step)
 
-            shuffled_carry1, shuffled_carry2 = jax.tree.map(
-                partial(convert_data, num_steps=1), (carry1, carry2))
+            shuffled_init_rstate1, shuffled_init_rstate2 = jax.tree.map(
+                partial(convert_data, multi_step=False), (init_rstate1, init_rstate2))
             shuffled_storage, shuffled_switch, shuffled_advantages, shuffled_target_values = jax.tree.map(
-                partial(convert_data, num_steps=num_steps), (storage, switch, advantages, target_values))
+                partial(convert_data, multi_step=True), (storage, switch, advantages, target_values))
 
             def update_minibatch(agent_state, minibatch):
                 (loss, (pg_loss, v_loss, entropy_loss, approx_kl)), grads = ppo_loss_grad_fn(
@@ -695,8 +697,8 @@ if __name__ == "__main__":
                 agent_state,
                 (
                     (
-                    shuffled_carry1,
-                    shuffled_carry2,
+                    shuffled_init_rstate1,
+                    shuffled_init_rstate2,
                     shuffled_storage.obs,
                     shuffled_storage.dones,
                     shuffled_switch,
@@ -759,47 +761,23 @@ if __name__ == "__main__":
     while True:
         learner_policy_version += 1
         rollout_queue_get_time_start = time.time()
-        sharded_storages = []
-        sharded_next_obss = []
-        sharded_next_carries = []
-        sharded_carries1 = []
-        sharded_carries2 = []        
-        sharded_next_dones = []
-        sharded_next_learns = []
+        sharded_data_list = []
         for d_idx, d_id in enumerate(args.actor_device_ids):
             for thread_id in range(args.num_actor_threads):
                 (
                     global_step,
                     actor_policy_version,
                     update,
-                    sharded_storage,
-                    sharded_next_obs,
-                    sharded_next_carry,
-                    sharded_carry1,
-                    sharded_carry2,
-                    sharded_next_done,
-                    sharded_next_learn,
+                    *sharded_data,
                     avg_params_queue_get_time,
                     device_thread_id,
                 ) = rollout_queues[d_idx * args.num_actor_threads + thread_id].get()
-                sharded_storages.append(sharded_storage)
-                sharded_next_obss.append(sharded_next_obs)
-                sharded_next_carries.append(sharded_next_carry)
-                sharded_carries1.append(sharded_carry1)
-                sharded_carries2.append(sharded_carry2)
-                sharded_next_dones.append(sharded_next_done)
-                sharded_next_learns.append(sharded_next_learn)
+                sharded_data_list.append(sharded_data)
         rollout_queue_get_time.append(time.time() - rollout_queue_get_time_start)
         training_time_start = time.time()
         (agent_state, loss, pg_loss, v_loss, entropy_loss, approx_kl, learner_keys) = multi_device_update(
             agent_state,
-            sharded_storages,
-            sharded_next_obss,
-            sharded_next_carries,
-            sharded_carries1,
-            sharded_carries2,
-            sharded_next_dones,
-            sharded_next_learns,
+            *list(zip(*sharded_data_list)),
             learner_keys,
         )
         unreplicated_params = flax.jax_utils.unreplicate(agent_state.params)
