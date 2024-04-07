@@ -2,6 +2,11 @@
 
 YGO Agent is a project to create a Yu-Gi-Oh! AI using deep learning (LLMs, RL). It consists of a game environment and a set of AI agents.
 
+## News
+
+- April 7, 2024: We have switched to JAX for training and evalution due to the better performance and flexibility. The scripts are in the `scripts/jax` directory. The documentation is in progress. PyTorch scripts are still available in the `scripts` directory, but they are not maintained.
+
+
 ## Table of Contents
 - [Subprojects](#subprojects)
   - [ygoenv](#ygoenv)
@@ -15,6 +20,7 @@ YGO Agent is a project to create a Yu-Gi-Oh! AI using deep learning (LLMs, RL). 
 - [Training](#training)
   - [Single GPU Training](#single-gpu-training)
   - [Distributed Training](#distributed-training)
+- [Training (JAX)](#training-jax)
 - [Plan](#plan)
   - [Training](#training-1)
   - [Inference](#inference)
@@ -158,21 +164,29 @@ OMP_NUM_THREADS=4 torchrun --nnodes=2 --nproc-per-node=8 --node-rank=1 \
 
 The script options are mostly the same as the single GPU training. We only scale the batch size and the number of environments to the number of available CPUs and GPUs. The learning rate is then scaled according to the batch size.
 
-
 ## Plan
 
+### Environment
+- Fix information leak in the history actions
+
 ### Training
-- Add opponent history actions and turn info to the history actions
 - Evaluation with old models during training
-- LSTM for memory
 - League training following AlphaStar and ROA-Star
 
 ### Inference
 - MCTS-based planning
 - Support of play in YGOPro
 
+### Documentation
+- JAX training and evaluation
+
+
+## Sponsors
+This work is supported with Cloud TPUs from Google's [TPU Research Cloud (TRC)](https://sites.research.google/trc/about/).
+
+
 ## Related Projects
 - [ygopro-core](https://github.com/Fluorohydride/ygopro-core)
 - [envpool](https://github.com/sail-sg/envpool)
-- [yugioh-ai](https://github.com/melvinzhang/yugioh-ai])
+- [yugioh-ai](https://github.com/melvinzhang/yugioh-ai)
 - [yugioh-game](https://github.com/tspivey/yugioh-game)
