@@ -44,11 +44,9 @@ class PositionalEncoding(nn.Module):
 
 class Encoder(nn.Module):
 
-    def __init__(self, channels=128, num_card_layers=2, num_action_layers=2,
-                 num_history_action_layers=2, embedding_shape=None, bias=False, affine=True):
+    def __init__(self, channels=128, num_card_layers=2, num_action_layers=2, embedding_shape=None, bias=False, affine=True):
         super(Encoder, self).__init__()
         self.channels = channels
-        self.num_history_action_layers = num_history_action_layers
 
         c = channels
         self.loc_embed = nn.Embedding(9, c)
@@ -165,11 +163,17 @@ class Encoder(nn.Module):
             for i in range(num_action_layers)
         ])
 
-        self.action_history_pe = PositionalEncoding(c, dropout=0.0)
+        self.history_action_pe = PositionalEncoding(c, dropout=0.0)
+        self.history_action_net = nn.ModuleList([
+            nn.TransformerEncoderLayer(
+                c, num_heads, c * 4, dropout=0.0, batch_first=True, norm_first=True)
+            for i in range(num_action_layers)
+        ])
+
         self.action_history_net = nn.ModuleList([
             nn.TransformerDecoderLayer(
                 c, num_heads, c * 4, dropout=0.0, batch_first=True, norm_first=True, bias=False)
-            for i in range(num_history_action_layers)
+            for i in range(num_action_layers)
         ])
 
         self.action_norm = nn.LayerNorm(c, elementwise_affine=False)
@@ -287,6 +291,7 @@ class Encoder(nn.Module):
         x_cards = x['cards_']
         x_global = x['global_']
         x_actions = x['actions_']
+        batch_size = x_cards.shape[0]
         
         x_cards_1 = x_cards[:, :, :12].long()
         x_cards_2 = x_cards[:, :, 12:].to(torch.float32)
@@ -294,7 +299,10 @@ class Encoder(nn.Module):
         x_id = self.encode_card_id(x_cards_1[:, :, :2])
         x_id = self.id_norm(x_id)
 
-        f_loc = self.loc_norm(self.loc_embed(x_cards_1[:, :, 2]))
+        x_loc = x_cards_1[:, :, 2]
+        c_mask = x_loc == 0
+        c_mask[:, 0] = False
+        f_loc = self.loc_norm(self.loc_embed(x_loc))
         f_seq = self.seq_norm(self.seq_embed(x_cards_1[:, :, 3]))
 
         x_feat1 = self.encode_card_feat1(x_cards_1)
@@ -306,11 +314,14 @@ class Encoder(nn.Module):
         f_cards = torch.cat([x_id, x_feat], dim=-1)
         f_cards = f_cards + f_loc + f_seq
 
-        f_na_card = self.na_card_embed.expand(f_cards.shape[0], -1, -1)
-        f_cards = torch.cat([f_na_card, f_cards], dim=1)
-
         for layer in self.card_net:
-            f_cards = layer(f_cards)
+            # f_cards = layer(f_cards, src_key_padding_mask=c_mask)
+            f_cards = layer(f_cards, src_key_padding_mask=c_mask)
+        f_na_card = self.na_card_embed.expand(batch_size, -1, -1)
+        f_cards = torch.cat([f_na_card, f_cards], dim=1)
+        # TODO: we can't use it because cudagraph says complex memory
+        # c_mask = torch.cat([torch.zeros(batch_size, 1, dtype=c_mask.dtype, device=c_mask.device), c_mask], dim=1)
+
         f_cards = self.card_norm(f_cards)
         
         x_global = self.encode_global(x_global)
@@ -332,23 +343,27 @@ class Encoder(nn.Module):
 
         mask = x_actions[:, :, 2] == 0  # msg == 0
         valid = x['global_'][:, -1] == 0
-        mask[:, 0] &= valid
+        mask[:, 0] = False
+        # mask[:, 0] &= valid
         for layer in self.action_card_net:
-            f_actions = layer(f_actions, f_cards, tgt_key_padding_mask=mask)
+            f_actions = layer(
+                f_actions, f_cards[:, 1:], tgt_key_padding_mask=mask, memory_key_padding_mask=c_mask)
+        x_h_actions = x['h_actions_']
+        x_h_actions = x_h_actions.long()
 
-        if self.num_history_action_layers != 0:
-            x_h_actions = x['h_actions_']
-            x_h_actions = x_h_actions.long()
+        x_h_id = self.get_h_action_card_(x_h_actions[..., :2])
+        h_mask = x_h_actions[:, :, 2] == 0  # msg == 0
+        h_mask[:, 0] = False
+        x_h_a_feats = self.encode_action_(x_h_actions[:, :, 2:])
+        x_h_a_feats = torch.cat(x_h_a_feats, dim=-1)
+        f_h_actions = self.h_id_norm(x_h_id) + self.h_a_feat_norm(x_h_a_feats)
+        f_h_actions = self.history_action_pe(f_h_actions)
 
-            x_h_id = self.get_h_action_card_(x_h_actions[..., :2])
-
-            x_h_a_feats = self.encode_action_(x_h_actions[:, :, 2:])
-            x_h_a_feats = torch.cat(x_h_a_feats, dim=-1)
-            f_h_actions = self.h_id_norm(x_h_id) + self.h_a_feat_norm(x_h_a_feats)
-            f_h_actions = self.action_history_pe(f_h_actions)
-            
-            for layer in self.action_history_net:
-                f_actions = layer(f_actions, f_h_actions)
+        for layer in self.history_action_net:
+            f_h_actions = layer(f_h_actions, src_key_padding_mask=h_mask)
+        for layer in self.action_history_net:
+            f_actions = layer(
+                f_actions, f_h_actions, tgt_key_padding_mask=mask, memory_key_padding_mask=h_mask)
 
         f_actions = self.action_norm(f_actions)
 
@@ -385,13 +400,12 @@ class Actor(nn.Module):
 
 class PPOAgent(nn.Module):
 
-    def __init__(self, channels=128, num_card_layers=2, num_action_layers=2,
-                 num_history_action_layers=2, embedding_shape=None, bias=False,
+    def __init__(self, channels=128, num_card_layers=2, num_action_layers=2, embedding_shape=None, bias=False,
                  affine=True, a_trans=True):
         super(PPOAgent, self).__init__()
 
         self.encoder = Encoder(
-            channels, num_card_layers, num_action_layers, num_history_action_layers, embedding_shape, bias, affine)
+            channels, num_card_layers, num_action_layers, embedding_shape, bias, affine)
 
         c = channels
         self.actor = Actor(c, a_trans)

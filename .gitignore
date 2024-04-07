@@ -1,3 +1,7 @@
+*.pt
+*.ptj
+*.pkl
+
 # Xmake cache
 .xmake/
 

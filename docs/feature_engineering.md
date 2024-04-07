@@ -88,4 +88,7 @@
 
 ## History Actions
 - 0,1: card id, uint16 -> 2 uint8
-- others same as legal actions
+- 2-12 same as legal actions
+- 13: player, discrete, 0: me, 1: oppo
+- 14: turn, discrete, trunc to 3
+

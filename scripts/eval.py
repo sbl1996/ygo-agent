@@ -14,18 +14,12 @@ import tyro
 
 from ygoai.utils import init_ygopro
 from ygoai.rl.utils import RecordEpisodeStatistics
-from ygoai.rl.agent import PPOAgent as Agent
-from ygoai.rl.buffer import create_obs
 
 
 @dataclass
 class Args:
     seed: int = 1
     """the random seed"""
-    torch_deterministic: bool = True
-    """if toggled, `torch.backends.cudnn.deterministic=False`"""
-    cuda: bool = True
-    """if toggled, cuda will be enabled by default"""
 
     env_id: str = "YGOPro-v0"
     """the id of the environment"""
@@ -41,7 +35,7 @@ class Args:
     """the language to use"""
     max_options: int = 24
     """the maximum number of options"""
-    n_history_actions: int = 16
+    n_history_actions: int = 32
     """the number of history actions to use"""
     num_embeddings: Optional[int] = None
     """the number of embeddings of the agent"""
@@ -50,8 +44,6 @@ class Args:
     """the player to play as, -1 means random, 0 is the first player, 1 is the second player"""
     play: bool = False
     """whether to play the game"""
-    selfplay: bool = False
-    """whether to use selfplay"""
     record: bool = False
     """whether to record the game as YGOPro replays"""
 
@@ -67,26 +59,35 @@ class Args:
     strategy: Literal["random", "greedy"] = "greedy"
     """the strategy to use if agent is not used"""
 
-    agent: bool = False
-    """whether to use the agent"""
     num_layers: int = 2
     """the number of layers for the agent"""
     num_channels: int = 128
     """the number of channels for the agent"""
-    checkpoint: Optional[str] = "checkpoints/agent.pt"
-    """the checkpoint to load"""
+    checkpoint: Optional[str] = None
+    """the checkpoint to load, `pt` or `flax_model` file"""
 
+    # Jax specific
+    xla_device: Optional[str] = None
+    """the XLA device to use, defaults to `None`"""
+
+    # PyTorch specific
+    torch_deterministic: bool = True
+    """if toggled, `torch.backends.cudnn.deterministic=False`"""
+    cuda: bool = True
+    """if toggled, cuda will be enabled by default"""
     compile: bool = False
     """if toggled, the model will be compiled"""
     optimize: bool = True
     """if toggled, the model will be optimized"""
     convert: bool = False
     """if toggled, the model will be converted to a jit model and the program will exit"""
-
     torch_threads: Optional[int] = None
     """the number of threads to use for torch, defaults to ($OMP_NUM_THREADS or 2) * world_size"""
+
     env_threads: Optional[int] = 16
     """the number of threads to use for envpool, defaults to `num_envs`"""
+
+    framework: Optional[Literal["torch", "jax"]] = None
 
 
 if __name__ == "__main__":
@@ -102,7 +103,6 @@ if __name__ == "__main__":
             os.makedirs("replay")
 
     args.env_threads = min(args.env_threads or args.num_envs, args.num_envs)
-    args.torch_threads = args.torch_threads or int(os.getenv("OMP_NUM_THREADS", "4"))
 
     deck = init_ygopro(args.env_id, args.lang, args.deck, args.code_list_file)
 
@@ -113,15 +113,20 @@ if __name__ == "__main__":
     random.seed(seed)
     np.random.seed(seed)
 
-    if args.agent:
+    if args.checkpoint and args.framework is None:
+        args.framework = "jax" if "flax_model" in args.checkpoint else "torch"
+
+    if args.framework == "torch":
         import torch
         torch.manual_seed(args.seed)
         torch.backends.cudnn.deterministic = args.torch_deterministic
 
+        args.torch_threads = args.torch_threads or int(os.getenv("OMP_NUM_THREADS", "4"))
         torch.set_num_threads(args.torch_threads)
         torch.set_float32_matmul_precision('high')
-
-        device = torch.device("cuda" if torch.cuda.is_available() and args.cuda else "cpu")
+    else:
+        if args.xla_device is not None:
+            os.environ.setdefault("JAX_PLATFORMS", args.xla_device)
 
     num_envs = args.num_envs
 
@@ -136,15 +141,22 @@ if __name__ == "__main__":
         player=args.player,
         max_options=args.max_options,
         n_history_actions=args.n_history_actions,
-        play_mode='human' if args.play else ('self' if args.selfplay else ('bot' if args.bot_type == "greedy" else "random")),
+        play_mode='human' if args.play else ('bot' if args.bot_type == "greedy" else "random"),
+        async_reset=False,
         verbose=args.verbose,
         record=args.record,
     )
+    obs_space = envs.observation_space
     envs.num_envs = num_envs
     envs = RecordEpisodeStatistics(envs)
 
-    if args.agent:
-        if args.checkpoint and args.checkpoint.endswith(".ptj"):
+    if args.framework == 'torch':
+        from ygoai.rl.agent import PPOAgent as Agent
+        from ygoai.rl.buffer import create_obs
+
+        device = torch.device("cuda" if torch.cuda.is_available() and args.cuda else "cpu")
+
+        if args.checkpoint.endswith(".ptj"):
             agent = torch.jit.load(args.checkpoint)
         else:
             # count lines of code_list
@@ -154,13 +166,12 @@ if __name__ == "__main__":
                     code_list = f.readlines()
                     embedding_shape = len(code_list)
             L = args.num_layers
-            agent = Agent(args.num_channels, L, L, 2, embedding_shape).to(device)
-            if args.checkpoint:
-                state_dict = torch.load(args.checkpoint, map_location=device)
-                if not args.compile:
-                    prefix = "_orig_mod."
-                    state_dict = {k[len(prefix):] if k.startswith(prefix) else k: v for k, v in state_dict.items()}
-                print(agent.load_state_dict(state_dict))
+            agent = Agent(args.num_channels, L, L, embedding_shape).to(device)
+            state_dict = torch.load(args.checkpoint, map_location=device)
+            if not args.compile:
+                prefix = "_orig_mod."
+                state_dict = {k[len(prefix):] if k.startswith(prefix) else k: v for k, v in state_dict.items()}
+            print(agent.load_state_dict(state_dict))
 
             if args.compile:
                 if args.convert:
@@ -191,6 +202,48 @@ if __name__ == "__main__":
                     print(f"Optimized model saved to {args.checkpoint}j")
                     exit(0)
 
+        def predict_fn(obs):
+            obs = optree.tree_map(lambda x: torch.from_numpy(x).to(device=device), obs)
+            with torch.no_grad():
+                logits = agent(obs)[0]
+            probs = torch.softmax(logits, dim=-1)
+            probs = probs.cpu().numpy()
+            return probs
+    else:
+        import jax
+        import jax.numpy as jnp
+        import flax
+        from ygoai.rl.jax.agent2 import PPOAgent
+        def create_agent(args):
+            return PPOAgent(
+                channels=128,
+                num_layers=2,
+                embedding_shape=args.num_embeddings,
+            )
+        agent = create_agent(args)
+
+        key = jax.random.PRNGKey(args.seed)
+        key, agent_key = jax.random.split(key, 2)
+        sample_obs = jax.tree_map(lambda x: jnp.array([x]), obs_space.sample())
+        params = agent.init(agent_key, sample_obs)
+        with open(args.checkpoint, "rb") as f:
+            params = flax.serialization.from_bytes(params, f.read())
+
+        @jax.jit
+        def get_probs(
+            params: flax.core.FrozenDict,
+            next_obs,
+        ):
+            logits = create_agent(args).apply(params, next_obs)[0]
+            return jax.nn.softmax(logits, axis=-1)
+
+        def predict_fn(obs):
+            probs = get_probs(params, obs)
+            return np.array(probs)
+
+        print(f"loaded checkpoint from {args.checkpoint}")
+
+
     obs, infos = envs.reset()
     next_to_play = infos['to_play']
 
@@ -210,16 +263,11 @@ if __name__ == "__main__":
             start_step = step
             model_time = env_time = 0
 
-        if args.agent:
+        if args.framework:
             _start = time.time()
-            obs = optree.tree_map(lambda x: torch.from_numpy(x).to(device=device), obs)
-            with torch.no_grad():
-                logits, values, _valid = agent(obs)
-            probs = torch.softmax(logits, dim=-1)
-            probs = probs.cpu().numpy()
+            probs = predict_fn(obs)
             if args.verbose:
                 print([f"{p:.4f}" for p in probs[probs != 0].tolist()])
-                print(f"{values[0].item():.4f}")
             actions = probs.argmax(axis=1)
             model_time += time.time() - _start
         else:
@@ -228,13 +276,6 @@ if __name__ == "__main__":
             else:
                 actions = np.zeros(num_envs, dtype=np.int32)
 
-        # for k, v in obs.items():
-        #     v = v[0]
-        #     if k == 'cards_':
-        #         v = np.concatenate([np.arange(v.shape[0])[:, None], v], axis=1)
-        #     print(k, v.tolist())
-        # print(infos)
-        # print(actions[0])
         to_play = next_to_play
 
         _start = time.time()
@@ -249,15 +290,7 @@ if __name__ == "__main__":
                 win_reason = infos['win_reason'][idx]
                 episode_length = infos['l'][idx]
                 episode_reward = infos['r'][idx]
-                if args.selfplay:
-                    pl = 1 if to_play[idx] == 0 else -1
-                    winner = 0 if episode_reward * pl > 0 else 1
-                    win = 1 - winner
-                else:
-                    if episode_reward < 0:
-                        win = 0
-                    else:
-                        win = 1
+                win = int(episode_reward > 0)
 
                 episode_lengths.append(episode_length)
                 episode_rewards.append(episode_reward)
