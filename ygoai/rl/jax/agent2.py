@@ -18,7 +18,7 @@ class ActionEncoder(nn.Module):
     channels: int = 128
     dtype: Optional[jnp.dtype] = None
     param_dtype: jnp.dtype = jnp.float32
-    
+
     @nn.compact
     def __call__(self, x):
         c = self.channels
@@ -26,7 +26,6 @@ class ActionEncoder(nn.Module):
         embed = partial(
             nn.Embed, dtype=self.dtype, param_dtype=self.param_dtype,
             embedding_init=default_embed_init)
-        
         x_a_msg = embed(30, c // div)(x[:, :, 0])
         x_a_act = embed(13, c // div)(x[:, :, 1])
         x_a_yesno = embed(3, c // div)(x[:, :, 2])
@@ -38,9 +37,9 @@ class ActionEncoder(nn.Module):
         x_a_number = embed(13, c // div // 2)(x[:, :, 8])
         x_a_place = embed(31, c // div // 2)(x[:, :, 9])
         x_a_attrib = embed(10, c // div // 2)(x[:, :, 10])
-        return jnp.concatenate([
-            x_a_msg, x_a_act, x_a_yesno, x_a_phase, x_a_cancel, x_a_finish,
-            x_a_position, x_a_option, x_a_number, x_a_place, x_a_attrib], axis=-1)
+        xs = [x_a_msg, x_a_act, x_a_yesno, x_a_phase, x_a_cancel, x_a_finish,
+              x_a_position, x_a_option, x_a_number, x_a_place, x_a_attrib]
+        return xs
 
 
 class CardEncoder(nn.Module):
@@ -169,7 +168,8 @@ class Encoder(nn.Module):
         fc_layer = partial(nn.Dense, use_bias=False, param_dtype=self.param_dtype)
 
         id_embed = embed(n_embed, embed_dim)
-        action_encoder = ActionEncoder(channels=c, dtype=jnp.float32, param_dtype=self.param_dtype)
+        action_encoder = ActionEncoder(
+            channels=c, dtype=jnp.float32, param_dtype=self.param_dtype)
 
         x_cards = x['cards_']
         x_global = x['global_']
@@ -216,7 +216,13 @@ class Encoder(nn.Module):
             (c, c), dtype=jnp.float32, param_dtype=self.param_dtype,
             kernel_init=default_fc_init2)(id_embed(x_h_id))
 
-        x_h_a_feats = action_encoder(x_h_actions[:, :, 2:])
+        x_h_a_feats1 = action_encoder(x_h_actions[:, :, 2:13])
+
+        x_h_a_player = embed(2, c // 2)(x_h_actions[:, :, 13])
+        x_h_a_turn = embed(20, c // 2)(x_h_actions[:, :, 14])
+        x_h_a_feats = jnp.concatenate([
+            *x_h_a_feats1, x_h_a_player, x_h_a_turn], axis=-1)
+
         f_h_actions = layer_norm()(x_h_id) + layer_norm()(fc_layer(c, dtype=jnp.float32)(x_h_a_feats))
 
         f_h_actions = PositionalEncoding()(f_h_actions)
@@ -240,7 +246,7 @@ class Encoder(nn.Module):
         f_a_cards = f_cards[B[:, None], spec_index]
         f_a_cards = fc_layer(c, dtype=self.dtype)(f_a_cards)
 
-        x_a_feats = action_encoder(x_actions[..., 2:])
+        x_a_feats = jnp.concatenate(action_encoder(x_actions[..., 2:]), axis=-1)
         x_a_feats = fc_layer(c, dtype=self.dtype)(x_a_feats)
         f_actions = jnp.concatenate([f_a_cards, x_a_feats], axis=-1)
         f_actions = fc_layer(c, dtype=self.dtype)(nn.leaky_relu(f_actions, negative_slope=0.1))
