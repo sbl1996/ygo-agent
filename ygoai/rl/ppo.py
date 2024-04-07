@@ -16,7 +16,7 @@ def entropy_from_logits(logits):
 
 def train_step(agent, optimizer, scaler, mb_obs, mb_actions, mb_logprobs, mb_advantages, mb_returns, mb_values, mb_learns, args):
     with autocast(enabled=args.fp16_train):
-        logits, newvalue, valid = agent(mb_obs)
+        logits, newvalue, valid = agent(mb_obs)[:3]
         logits = logits - logits.logsumexp(dim=-1, keepdim=True)
         newlogprob = logits.gather(-1, mb_actions[:, None]).squeeze(-1)
         entropy = entropy_from_logits(logits)

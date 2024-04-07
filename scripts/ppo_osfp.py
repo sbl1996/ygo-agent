@@ -69,11 +69,11 @@ class Args:
     """the number of parallel game environments"""
     num_steps: int = 128
     """the number of steps to run in each environment per policy rollout"""
-    anneal_lr: bool = False
+    anneal_lr: bool = True
     """Toggle learning rate annealing for policy and value networks"""
     gamma: float = 1.0
     """the discount factor gamma"""
-    gae_lambda: float = 0.98
+    gae_lambda: float = 0.95
     """the lambda for the general advantage estimation"""
 
     update_win_rate: float = 0.55
@@ -103,8 +103,6 @@ class Args:
     """coefficient of the value function"""
     max_grad_norm: float = 1.0
     """the maximum norm for the gradient clipping"""
-    learn_opponent: bool = False
-    """if toggled, the samples from the opponent will be used to train the agent"""
     collect_length: Optional[int] = None
     """the length of the buffer, only the first `num_steps` will be used for training (partial GAE)"""
 
@@ -145,6 +143,8 @@ class Args:
     """the number of iterations (computed in runtime)"""
     world_size: int = 0
     """the number of processes (computed in runtime)"""
+    num_embeddings: Optional[int] = None
+    """the number of embeddings (computed in runtime)"""
 
 
 def make_env(args, num_envs, num_threads, mode='self'):
@@ -158,7 +158,7 @@ def make_env(args, num_envs, num_threads, mode='self'):
         deck2=args.deck2,
         max_options=args.max_options,
         n_history_actions=args.n_history_actions,
-        play_mode='self',
+        play_mode=mode,
     )
     envs.num_envs = num_envs
     envs = RecordEpisodeStatistics(envs)
@@ -181,6 +181,7 @@ def main():
     args.local_minibatch_size = int(args.minibatch_size // args.world_size)
     args.batch_size = int(args.num_envs * args.num_steps)
     args.num_iterations = args.total_timesteps // args.batch_size
+    args.num_minibatches = args.local_batch_size // args.local_minibatch_size
     args.env_threads = args.env_threads or args.num_envs
     args.torch_threads = args.torch_threads or (int(os.getenv("OMP_NUM_THREADS", "2")) * args.world_size)
     args.collect_length = args.collect_length or args.num_steps
@@ -473,7 +474,7 @@ def main():
         b_advantages = advantages[:args.num_steps].reshape(-1)
         b_values = values[:args.num_steps].reshape(-1)
         b_returns = b_advantages + b_values
-        if args.learn_opponent or selfplay:
+        if selfplay:
             b_learns = torch.ones_like(b_values, dtype=torch.bool)
         else:
             b_learns = learns[:args.num_steps].reshape(-1)

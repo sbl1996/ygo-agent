@@ -8,6 +8,7 @@ from collections import deque
 from dataclasses import dataclass, field
 from types import SimpleNamespace
 from typing import List, NamedTuple, Optional
+from functools import partial
 
 import ygoenv
 import flax
@@ -15,6 +16,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import optax
+import rlax
 import tyro
 from flax.training.train_state import TrainState
 from rich.pretty import pprint
@@ -24,8 +26,7 @@ from ygoai.utils import init_ygopro
 from ygoai.rl.jax.agent2 import PPOAgent
 from ygoai.rl.jax.utils import RecordEpisodeStatistics, masked_mean, masked_normalize
 from ygoai.rl.jax.eval import evaluate
-from ygoai.rl.jax import compute_gae, compute_gae_upgo
-
+from ygoai.rl.jax import vtrace, upgo_return, clipped_surrogate_pg_loss
 
 os.environ["XLA_FLAGS"] = "--xla_cpu_multi_thread_eigen=false intra_op_parallelism_threads=1"
 
@@ -61,34 +62,38 @@ class Args:
 
     total_timesteps: int = 5000000000
     """total timesteps of the experiments"""
-    learning_rate: float = 1e-3
+    learning_rate: float = 3e-4
     """the learning rate of the optimizer"""
-    local_num_envs: int = 128
+    local_num_envs: int = 64
     """the number of parallel game environments"""
     local_env_threads: Optional[int] = None
     """the number of threads to use for environment"""
     num_actor_threads: int = 2
     """the number of actor threads to use"""
-    num_steps: int = 128
+    num_steps: int = 20
     """the number of steps to run in each environment per policy rollout"""
-    collect_length: Optional[int] = None
-    """the number of steps to compute the advantages"""
     anneal_lr: bool = False
     """Toggle learning rate annealing for policy and value networks"""
     gamma: float = 1.0
     """the discount factor gamma"""
-    gae_lambda: float = 0.95
-    """the lambda for the general advantage estimation"""
-    upgo: bool = False
-    """Toggle the use of UPGO for advantages"""
-    num_minibatches: int = 8
+    num_minibatches: int = 4
     """the number of mini-batches"""
-    update_epochs: int = 2
-    """the K epochs to update the policy"""
-    norm_adv: bool = False
-    """Toggles advantages normalization"""
+    gradient_accumulation_steps: int = 1
+    """the number of gradient accumulation steps before performing an optimization step"""
+    c_clip_min: float = 0.001
+    """the minimum value of the importance sampling clipping"""
+    c_clip_max: float = 1.007
+    """the maximum value of the importance sampling clipping"""
+    rho_clip_min: float = 0.001
+    """the minimum value of the importance sampling clipping"""
+    rho_clip_max: float = 1.007
+    """the maximum value of the importance sampling clipping"""
+    upgo: bool = False
+    """whether to use UPGO for policy update"""
+    ppo_clip: bool = True
+    """whether to use the PPO clipping to replace V-Trace surrogate clipping"""
     clip_coef: float = 0.25
-    """the surrogate clipping coefficient"""
+    """the PPO surrogate clipping coefficient"""
     ent_coef: float = 0.01
     """coefficient of the entropy"""
     vf_coef: float = 0.5
@@ -162,7 +167,7 @@ class Transition(NamedTuple):
     obs: list
     dones: list
     actions: list
-    logprobs: list
+    logitss: list
     rewards: list
     learns: list
 
@@ -213,17 +218,18 @@ def rollout(
     avg_win_rates = deque(maxlen=1000)
 
     @jax.jit
-    def get_logits(
+    def apply_fn(
         params: flax.core.FrozenDict,
         next_obs,
     ):
-        return create_agent(args).apply(params, next_obs)[0]
+        logits, value, _valid = create_agent(args).apply(params, next_obs)
+        return logits, value
 
     def get_action(
         params: flax.core.FrozenDict,
         next_obs,
     ):
-        return get_logits(params, next_obs).argmax(axis=1)
+        return apply_fn(params, next_obs)[0].argmax(axis=1)
 
     @jax.jit
     def sample_action(
@@ -232,29 +238,28 @@ def rollout(
         key: jax.random.PRNGKey,
     ):
         next_obs = jax.tree_map(lambda x: jnp.array(x), next_obs)
-        logits = get_logits(params, next_obs)
+        logits = apply_fn(params, next_obs)[0]
         # sample action: Gumbel-softmax trick
         # see https://stats.stackexchange.com/questions/359442/sampling-from-a-categorical-distribution
         key, subkey = jax.random.split(key)
         u = jax.random.uniform(subkey, shape=logits.shape)
         action = jnp.argmax(logits - jnp.log(-jnp.log(u)), axis=1)
-        logprob = jax.nn.log_softmax(logits)[jnp.arange(action.shape[0]), action]
-        return next_obs, action, logprob, key
+        return next_obs, action, logits, key
 
     # put data in the last index
+    envs.async_reset()
+
     params_queue_get_time = deque(maxlen=10)
     rollout_time = deque(maxlen=10)
     actor_policy_version = 0
-    next_obs, info = envs.reset()
-    next_to_play = info["to_play"]
-    next_done = np.zeros(args.local_num_envs, dtype=np.bool_)
+    storage = []
     ai_player1 = np.concatenate([
         np.zeros(args.local_num_envs // 2, dtype=np.int64),
         np.ones(args.local_num_envs // 2, dtype=np.int64)
     ])
     np.random.shuffle(ai_player1)
-    start_step = 0
-    storage = []
+    next_to_play = None
+    learn = np.ones(args.local_num_envs, dtype=np.bool_)
 
     @jax.jit
     def prepare_data(storage: List[Transition]) -> Transition:
@@ -268,6 +273,9 @@ def rollout(
         update_time_start = time.time()
         inference_time = 0
         env_time = 0
+        num_steps_with_bootstrap = (
+            args.num_steps + int(len(storage) == 0)
+        )  # num_steps + 1 to get the states for value bootstrapping.
         params_queue_get_time_start = time.time()
         if args.concurrency:
             if update != 2:
@@ -282,30 +290,30 @@ def rollout(
         params_queue_get_time.append(time.time() - params_queue_get_time_start)
 
         rollout_time_start = time.time()
-        for _ in range(start_step, args.collect_length):
+        for _ in range(0, num_steps_with_bootstrap):
             global_step += args.local_num_envs * n_actors * args.world_size
 
-            cached_next_obs = next_obs
-            cached_next_done = next_done
+            _start = time.time()
+            next_obs, next_reward, next_done, info = envs.recv()
+            next_reward = np.where(learn, next_reward, -next_reward)
+            env_time += time.time() - _start
+            to_play = next_to_play
+            next_to_play = info["to_play"]
             learn = next_to_play == ai_player1
 
             inference_time_start = time.time()
-            cached_next_obs, action, logprob, key = sample_action(params, cached_next_obs, key)
+            next_obs, action, logits, key = sample_action(params, next_obs, key)
             cpu_action = np.array(action)
             inference_time += time.time() - inference_time_start
 
-            _start = time.time()
-            to_play = next_to_play
-            next_obs, next_reward, next_done, info = envs.step(cpu_action)
-            next_to_play = info["to_play"]
-            env_time += time.time() - _start
+            envs.send(cpu_action)
 
             storage.append(
                 Transition(
-                    obs=cached_next_obs,
-                    dones=cached_next_done,
+                    obs=next_obs,
+                    dones=next_done,
                     actions=action,
-                    logprobs=logprob,
+                    logitss=logits,
                     rewards=next_reward,
                     learns=learn,
                 )
@@ -322,10 +330,7 @@ def rollout(
 
         rollout_time.append(time.time() - rollout_time_start)
 
-        start_step = args.collect_length - args.num_steps
-
         partitioned_storage = prepare_data(storage)
-        storage = storage[args.num_steps:]
         sharded_storage = []
         for x in partitioned_storage:
             if isinstance(x, dict):
@@ -337,23 +342,21 @@ def rollout(
                 x = jax.device_put_sharded(x, devices=learner_devices)
             sharded_storage.append(x)
         sharded_storage = Transition(*sharded_storage)
-        next_learn = ai_player1 == next_to_play
-        sharded_data = jax.tree_map(lambda x: jax.device_put_sharded(
-                np.split(x, len(learner_devices)), devices=learner_devices),
-                         (next_obs, next_done, next_learn))
         payload = (
             global_step,
             actor_policy_version,
             update,
             sharded_storage,
-            *sharded_data,
             np.mean(params_queue_get_time),
             device_thread_id,
         )
         rollout_queue.put(payload)
 
+        # move bootstrapping step to the beginning of the next update
+        storage = storage[-1:]
+
         if update % args.log_frequency == 0:
-            avg_episodic_return = np.mean(avg_ep_returns)
+            avg_episodic_return = np.mean(avg_ep_returns) if len(avg_ep_returns) > 0 else 0
             avg_episodic_length = np.mean(envs.returned_episode_lengths)
             SPS = int((global_step - warmup_step) / (time.time() - start_time - other_time))
             SPS_update = int(args.batch_size / (time.time() - update_time_start))
@@ -393,17 +396,21 @@ def rollout(
 
 if __name__ == "__main__":
     args = tyro.cli(Args)
-    args.local_batch_size = int(args.local_num_envs * args.num_steps * args.num_actor_threads * len(args.actor_device_ids))
-    args.local_minibatch_size = int(args.local_batch_size // args.num_minibatches)
+    args.local_batch_size = int(
+        args.local_num_envs * args.num_steps * args.num_actor_threads * len(args.actor_device_ids))
+    args.local_minibatch_size = int(
+        args.local_batch_size // args.num_minibatches)
     assert (
         args.local_num_envs % len(args.learner_device_ids) == 0
     ), "local_num_envs must be divisible by len(learner_device_ids)"
     assert (
-        int(args.local_num_envs / len(args.learner_device_ids)) * args.num_actor_threads % args.num_minibatches == 0
+        int(args.local_num_envs / len(args.learner_device_ids)) *
+        args.num_actor_threads % args.num_minibatches == 0
     ), "int(local_num_envs / len(learner_device_ids)) must be divisible by num_minibatches"
     if args.distributed:
         jax.distributed.initialize(
-            local_device_ids=range(len(args.learner_device_ids) + len(args.actor_device_ids)),
+            local_device_ids=range(
+                len(args.learner_device_ids) + len(args.actor_device_ids)),
         )
         print(list(range(len(args.learner_device_ids) + len(args.actor_device_ids))))
 
@@ -412,13 +419,13 @@ if __name__ == "__main__":
 
     args.world_size = jax.process_count()
     args.local_rank = jax.process_index()
-    args.num_envs = args.local_num_envs * args.world_size * args.num_actor_threads * len(args.actor_device_ids)
+    args.num_envs = args.local_num_envs * args.world_size * \
+        args.num_actor_threads * len(args.actor_device_ids)
     args.batch_size = args.local_batch_size * args.world_size
     args.minibatch_size = args.local_minibatch_size * args.world_size
-    args.num_updates = args.total_timesteps // (args.local_batch_size * args.world_size)
+    args.num_updates = args.total_timesteps // (
+        args.local_batch_size * args.world_size)
     args.local_env_threads = args.local_env_threads or args.local_num_envs
-    args.collect_length = args.collect_length or args.num_steps
-    assert args.collect_length >= args.num_steps, "collect_length must be greater than or equal to num_steps"
 
     local_devices = jax.local_devices()
     global_devices = jax.devices()
@@ -430,7 +437,8 @@ if __name__ == "__main__":
         for d_id in args.learner_device_ids
     ]
     print("global_learner_decices", global_learner_decices)
-    args.global_learner_decices = [str(item) for item in global_learner_decices]
+    args.global_learner_decices = [
+        str(item) for item in global_learner_decices]
     args.actor_devices = [str(item) for item in actor_devices]
     args.learner_devices = [str(item) for item in learner_devices]
     pprint(args)
@@ -441,7 +449,8 @@ if __name__ == "__main__":
     writer = SummaryWriter(f"runs/{run_name}")
     writer.add_text(
         "hyperparameters",
-        "|param|value|\n|-|-|\n%s" % ("\n".join([f"|{key}|{value}|" for key, value in vars(args).items()])),
+        "|param|value|\n|-|-|\n%s" % (
+            "\n".join([f"|{key}|{value}|" for key, value in vars(args).items()])),
     )
 
     # seeding
@@ -467,7 +476,7 @@ if __name__ == "__main__":
     def linear_schedule(count):
         # anneal learning rate linearly after one training iteration which contains
         # (args.num_minibatches) gradient updates
-        frac = 1.0 - (count // (args.num_minibatches * args.update_epochs)) / args.num_updates
+        frac = 1.0 - (count // (args.num_minibatches)) / args.num_updates
         return args.learning_rate * frac
 
     agent = create_agent(args)
@@ -479,7 +488,7 @@ if __name__ == "__main__":
                 learning_rate=linear_schedule if args.anneal_lr else args.learning_rate, eps=1e-5
             ),
         ),
-        every_k_schedule=1,
+        every_k_schedule=args.gradient_accumulation_steps,
     )
     agent_state = TrainState.create(
         apply_fn=None,
@@ -487,136 +496,131 @@ if __name__ == "__main__":
         tx=tx,
     )
 
-    agent_state = flax.jax_utils.replicate(agent_state, devices=learner_devices)
+    agent_state = flax.jax_utils.replicate(
+        agent_state, devices=learner_devices)
     # print(agent.tabulate(agent_key, sample_obs))
 
     @jax.jit
-    def get_logprob_entropy_value(
+    def get_logits_and_value(
         params: flax.core.FrozenDict,
         obs: np.ndarray,
-        actions: np.ndarray,
     ):
         logits, value, valid = create_agent(args).apply(params, obs)
-        logprob = jax.nn.log_softmax(logits)[jnp.arange(actions.shape[0]), actions]
-        logits = logits - jax.scipy.special.logsumexp(logits, axis=-1, keepdims=True)
-        logits = logits.clip(min=jnp.finfo(logits.dtype).min)
-        p_log_p = logits * jax.nn.softmax(logits)
-        entropy = -p_log_p.sum(-1)
-        return logprob, entropy, value.squeeze(), valid
+        return logits, value.squeeze(-1), valid
 
-    def ppo_loss(params, obs, actions, logprobs, advantages, target_values):
-        newlogprob, entropy, newvalue, valid = get_logprob_entropy_value(params, obs, actions)
-        logratio = newlogprob - logprobs
-        ratio = jnp.exp(logratio)
-        approx_kl = ((ratio - 1) - logratio).mean()
+    def impala_loss(params, obs, actions, logitss, rewards, dones, learns):
+        # (num_steps + 1, local_num_envs // n_mb))
+        discounts = (1.0 - dones) * args.gamma
+        policy_logits, newvalue, valid = jax.vmap(
+            get_logits_and_value, in_axes=(None, 0))(params, obs)
         
-        if args.norm_adv:
-            advantages = masked_normalize(advantages, valid, eps=1e-8)
+        newvalue = jnp.where(learns, newvalue, -newvalue)
+        
+        v_t = newvalue[1:]
+        # Remove bootstrap timestep from non-timesteps.
+        v_tm1 = newvalue[:-1]
+        policy_logits = policy_logits[:-1]
+        logitss = logitss[:-1]
+        actions = actions[:-1]
+        mask = 1.0 - dones
+        rewards = rewards[1:]
+        discounts = discounts[1:]
+        mask = mask[:-1]
 
-        # Policy loss
-        pg_loss1 = -advantages * ratio
-        pg_loss2 = -advantages * jnp.clip(ratio, 1 - args.clip_coef, 1 + args.clip_coef)
-        pg_loss = jnp.maximum(pg_loss1, pg_loss2)
-        pg_loss = masked_mean(pg_loss, valid)
+        rhos = rlax.categorical_importance_sampling_ratios(
+            policy_logits, logitss, actions)
 
-        # Value loss
-        v_loss = 0.5 * ((newvalue - target_values) ** 2)
-        v_loss = masked_mean(v_loss, valid)
+        vtrace_fn = partial(
+            vtrace, c_clip_min=args.c_clip_min, c_clip_max=args.c_clip_max, rho_clip_min=args.rho_clip_min, rho_clip_max=args.rho_clip_max)
+        vtrace_returns = jax.vmap(
+            vtrace_fn, in_axes=1, out_axes=1)(
+            v_tm1, v_t, rewards, discounts, rhos)
+        jax.debug.print("R {}", jnp.where(dones[1:-1, :2], rewards[:-1, :2], 0).T)
+        jax.debug.print("E {}", jnp.where(dones[1:-1, :2], vtrace_returns.errors[:-1, :2] * 100, vtrace_returns.errors[:-1, :2]).T)
+        jax.debug.print("V {}", v_tm1[:-1, :2].T)
+        
+        T = v_tm1.shape[0]
+        if args.upgo:
+            advs = jax.vmap(upgo_return, in_axes=1, out_axes=1)(
+                rewards, v_t, discounts) - v_tm1
+        else:
+            advs = vtrace_returns.q_estimate - v_tm1
+        if args.ppo_clip:
+            pg_loss = jax.vmap(
+                partial(clipped_surrogate_pg_loss, epsilon=args.clip_coef), in_axes=1)(
+                rhos, advs, mask) * T
+            pg_loss = jnp.sum(pg_loss)
+        else:
+            pg_advs = jnp.minimum(args.rho_clip_max, rhos) * advs
+            pg_loss = jax.vmap(
+                rlax.policy_gradient_loss, in_axes=1)(
+                policy_logits, actions, pg_advs, mask) * T
+            pg_loss = jnp.sum(pg_loss)
 
-        entropy_loss = masked_mean(entropy, valid)
-        loss = pg_loss - args.ent_coef * entropy_loss + v_loss * args.vf_coef
-        return loss, (pg_loss, v_loss, entropy_loss, jax.lax.stop_gradient(approx_kl))
+        baseline_loss = 0.5 * jnp.sum(jnp.square(vtrace_returns.errors) * mask)
+
+        ent_loss = jax.vmap(rlax.entropy_loss, in_axes=1)(
+            policy_logits, mask) * T
+        ent_loss = jnp.sum(ent_loss)
+
+        n_samples = jnp.sum(mask)
+        pg_loss = pg_loss / n_samples
+        baseline_loss = baseline_loss / n_samples
+        ent_loss = ent_loss / n_samples
+
+        total_loss = pg_loss
+        total_loss += args.vf_coef * baseline_loss
+        total_loss += args.ent_coef * ent_loss
+        return total_loss, (pg_loss, baseline_loss, ent_loss)
 
     @jax.jit
     def single_device_update(
         agent_state: TrainState,
-        sharded_storages: List,
-        sharded_next_obs: List,
-        sharded_next_done: List,
-        sharded_next_learn: List,
+        sharded_storages: List[Transition],
         key: jax.random.PRNGKey,
     ):
-        def flatten(x):
-            return x.reshape((-1,) + x.shape[2:])
-
         storage = jax.tree_map(lambda *x: jnp.hstack(x), *sharded_storages)
-        next_obs = jax.tree_map(lambda *x: jnp.concatenate(x), *sharded_next_obs)
-        next_done, next_learn = [
-            jnp.concatenate(x) for x in [sharded_next_done, sharded_next_learn]
-        ]
-        ppo_loss_grad_fn = jax.value_and_grad(ppo_loss, has_aux=True)
+        impala_loss_grad_fn = jax.value_and_grad(impala_loss, has_aux=True)
 
-        def update_epoch(carry, _):
-            agent_state, key = carry
-            key, subkey = jax.random.split(key)
-
-            def get_value_minibatch(agent_state, mb_obs):
-                values = create_agent(args).apply(agent_state.params, mb_obs)[1].squeeze(-1)
-                return agent_state, values
-
-            flatten_obs = jax.tree_map(lambda x: x.reshape((-1, args.local_minibatch_size * 8) + x.shape[2:]), storage.obs)
-            _, values = jax.lax.scan(
-                get_value_minibatch, agent_state, flatten_obs)
-            values = values.reshape(storage.rewards.shape)
-
-            next_value = create_agent(args).apply(agent_state.params, next_obs)[1].squeeze(-1)
-
-            compute_gae_fn = compute_gae_upgo if args.upgo else compute_gae
-            advantages, target_values = compute_gae_fn(
-                next_value, next_done, next_learn,
-                values, storage.rewards, storage.dones, storage.learns,
-                args.gamma, args.gae_lambda)
-            advantages = advantages[:args.num_steps]
-            target_values = target_values[:args.num_steps]
-
-            def convert_data(x: jnp.ndarray):
-                x = jax.random.permutation(subkey, x)
-                x = jnp.reshape(x, (-1, args.local_minibatch_size) + x.shape[1:])
-                return x
-
-            flatten_storage = jax.tree_map(flatten, jax.tree_map(lambda x: x[:args.num_steps], storage))
-            flatten_advantages = flatten(advantages)
-            flatten_target_values = flatten(target_values)
-            shuffled_storage = jax.tree_map(convert_data, flatten_storage)
-            shuffled_advantages = convert_data(flatten_advantages)
-            shuffled_target_values = convert_data(flatten_target_values)
-
-            def update_minibatch(agent_state, minibatch):
-                mb_obs, mb_actions, mb_logprobs, mb_advantages, mb_target_values = minibatch
-                (loss, (pg_loss, v_loss, entropy_loss, approx_kl)), grads = ppo_loss_grad_fn(
-                    agent_state.params,
-                    mb_obs,
-                    mb_actions,
-                    mb_logprobs,
-                    mb_advantages,
-                    mb_target_values,
-                )
-                grads = jax.lax.pmean(grads, axis_name="local_devices")
-                agent_state = agent_state.apply_gradients(grads=grads)
-                return agent_state, (loss, pg_loss, v_loss, entropy_loss, approx_kl)
-
-            agent_state, (loss, pg_loss, v_loss, entropy_loss, approx_kl) = jax.lax.scan(
-                update_minibatch,
-                agent_state,
-                (
-                    shuffled_storage.obs,
-                    shuffled_storage.actions,
-                    shuffled_storage.logprobs,
-                    shuffled_advantages,
-                    shuffled_target_values,
-                ),
+        def update_minibatch(agent_state, minibatch):
+            mb_obs, mb_actions, mb_logitss, mb_rewards, mb_dones, mb_learns = minibatch
+            (loss, (pg_loss, v_loss, entropy_loss)), grads = impala_loss_grad_fn(
+                agent_state.params,
+                mb_obs,
+                mb_actions,
+                mb_logitss,
+                mb_rewards,
+                mb_dones,
+                mb_learns,
             )
-            return (agent_state, key), (loss, pg_loss, v_loss, entropy_loss, approx_kl)
+            grads = jax.lax.pmean(grads, axis_name="local_devices")
+            agent_state = agent_state.apply_gradients(grads=grads)
+            return agent_state, (loss, pg_loss, v_loss, entropy_loss)
 
-        (agent_state, key), (loss, pg_loss, v_loss, entropy_loss, approx_kl) = jax.lax.scan(
-            update_epoch, (agent_state, key), (), length=args.update_epochs
+        n_mb = args.num_minibatches * args.gradient_accumulation_steps
+        storage_obs = {
+            k: jnp.array(jnp.split(v, n_mb, axis=1))
+            for k, v in storage.obs.items()
+        }
+        agent_state, (loss, pg_loss, v_loss, entropy_loss) = jax.lax.scan(
+            update_minibatch,
+            agent_state,
+            (
+                # (num_steps + 1, local_num_envs) => (n_mb, num_steps + 1, local_num_envs // n_mb)
+                storage_obs,
+                jnp.array(jnp.split(storage.actions, n_mb, axis=1)),
+                jnp.array(jnp.split(storage.logitss, n_mb, axis=1)),
+                jnp.array(jnp.split(storage.rewards, n_mb, axis=1)),
+                jnp.array(jnp.split(storage.dones, n_mb, axis=1)),
+                jnp.array(jnp.split(storage.learns, n_mb, axis=1)),
+            ),
         )
         loss = jax.lax.pmean(loss, axis_name="local_devices").mean()
         pg_loss = jax.lax.pmean(pg_loss, axis_name="local_devices").mean()
         v_loss = jax.lax.pmean(v_loss, axis_name="local_devices").mean()
-        entropy_loss = jax.lax.pmean(entropy_loss, axis_name="local_devices").mean()
-        approx_kl = jax.lax.pmean(approx_kl, axis_name="local_devices").mean()
-        return agent_state, loss, pg_loss, v_loss, entropy_loss, approx_kl, key
+        entropy_loss = jax.lax.pmean(
+            entropy_loss, axis_name="local_devices").mean()
+        return agent_state, loss, pg_loss, v_loss, entropy_loss, key
 
     multi_device_update = jax.pmap(
         single_device_update,
@@ -632,7 +636,8 @@ if __name__ == "__main__":
 
     unreplicated_params = flax.jax_utils.unreplicate(agent_state.params)
     for d_idx, d_id in enumerate(args.actor_device_ids):
-        device_params = jax.device_put(unreplicated_params, local_devices[d_id])
+        device_params = jax.device_put(
+            unreplicated_params, local_devices[d_id])
         for thread_id in range(args.num_actor_threads):
             params_queues.append(queue.Queue(maxsize=1))
             rollout_queues.append(queue.Queue(maxsize=1))
@@ -658,9 +663,6 @@ if __name__ == "__main__":
         learner_policy_version += 1
         rollout_queue_get_time_start = time.time()
         sharded_storages = []
-        sharded_next_obss = []
-        sharded_next_dones = []
-        sharded_next_learns = []
         for d_idx, d_id in enumerate(args.actor_device_ids):
             for thread_id in range(args.num_actor_threads):
                 (
@@ -668,44 +670,42 @@ if __name__ == "__main__":
                     actor_policy_version,
                     update,
                     sharded_storage,
-                    sharded_next_obs,
-                    sharded_next_done,
-                    sharded_next_learn,
                     avg_params_queue_get_time,
                     device_thread_id,
                 ) = rollout_queues[d_idx * args.num_actor_threads + thread_id].get()
                 sharded_storages.append(sharded_storage)
-                sharded_next_obss.append(sharded_next_obs)
-                sharded_next_dones.append(sharded_next_done)
-                sharded_next_learns.append(sharded_next_learn)
-        rollout_queue_get_time.append(time.time() - rollout_queue_get_time_start)
+        rollout_queue_get_time.append(
+            time.time() - rollout_queue_get_time_start)
         training_time_start = time.time()
-        (agent_state, loss, pg_loss, v_loss, entropy_loss, approx_kl, learner_keys) = multi_device_update(
+        (agent_state, loss, pg_loss, v_loss, entropy_loss, learner_keys) = multi_device_update(
             agent_state,
             sharded_storages,
-            sharded_next_obss,
-            sharded_next_dones,
-            sharded_next_learns,
             learner_keys,
         )
         unreplicated_params = flax.jax_utils.unreplicate(agent_state.params)
         for d_idx, d_id in enumerate(args.actor_device_ids):
-            device_params = jax.device_put(unreplicated_params, local_devices[d_id])
+            device_params = jax.device_put(
+                unreplicated_params, local_devices[d_id])
             device_params["params"]["Encoder_0"]['Embed_0']["embedding"].block_until_ready()
             for thread_id in range(args.num_actor_threads):
-                params_queues[d_idx * args.num_actor_threads + thread_id].put(device_params)
+                params_queues[d_idx * args.num_actor_threads +
+                              thread_id].put(device_params)
 
         # record rewards for plotting purposes
         if learner_policy_version % args.log_frequency == 0:
-            writer.add_scalar("stats/rollout_queue_get_time", np.mean(rollout_queue_get_time), global_step)
+            writer.add_scalar("stats/rollout_queue_get_time",
+                              np.mean(rollout_queue_get_time), global_step)
             writer.add_scalar(
                 "stats/rollout_params_queue_get_time_diff",
                 np.mean(rollout_queue_get_time) - avg_params_queue_get_time,
                 global_step,
             )
-            writer.add_scalar("stats/training_time", time.time() - training_time_start, global_step)
-            writer.add_scalar("stats/rollout_queue_size", rollout_queues[-1].qsize(), global_step)
-            writer.add_scalar("stats/params_queue_size", params_queues[-1].qsize(), global_step)
+            writer.add_scalar("stats/training_time",
+                              time.time() - training_time_start, global_step)
+            writer.add_scalar("stats/rollout_queue_size",
+                              rollout_queues[-1].qsize(), global_step)
+            writer.add_scalar("stats/params_queue_size",
+                              params_queues[-1].qsize(), global_step)
             print(
                 global_step,
                 f"actor_update={update}, train_time={time.time() - training_time_start:.2f}",
@@ -713,16 +713,18 @@ if __name__ == "__main__":
             writer.add_scalar(
                 "charts/learning_rate", agent_state.opt_state[2][1].hyperparams["learning_rate"][-1].item(), global_step
             )
-            writer.add_scalar("losses/value_loss", v_loss[-1].item(), global_step)
-            writer.add_scalar("losses/policy_loss", pg_loss[-1].item(), global_step)
-            writer.add_scalar("losses/entropy", entropy_loss[-1].item(), global_step)
-            writer.add_scalar("losses/approx_kl", approx_kl[-1].item(), global_step)
+            writer.add_scalar("losses/value_loss",
+                              v_loss[-1].item(), global_step)
+            writer.add_scalar("losses/policy_loss",
+                              pg_loss[-1].item(), global_step)
+            writer.add_scalar("losses/entropy",
+                              entropy_loss[-1].item(), global_step)
             writer.add_scalar("losses/loss", loss[-1].item(), global_step)
 
         if args.local_rank == 0 and learner_policy_version % args.save_interval == 0:
             ckpt_dir = f"checkpoints/{run_name}"
             os.makedirs(ckpt_dir, exist_ok=True)
-            model_path = ckpt_dir + "/agent.flax_model"
+            model_path = ckpt_dir + "/agent.cleanrl_model"
             with open(model_path, "wb") as f:
                 f.write(
                     flax.serialization.to_bytes(
@@ -732,7 +734,7 @@ if __name__ == "__main__":
                         ]
                     )
                 )
-            print(f"model saved to {model_path}")   
+            print(f"model saved to {model_path}")
 
         if learner_policy_version >= args.num_updates:
             break

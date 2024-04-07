@@ -1,21 +1,26 @@
 import numpy as np
 
 
-def evaluate(envs, act_fn, params):
+def evaluate(envs, act_fn, params, rnn_state=None):
     num_episodes = envs.num_envs
     episode_lengths = []
     episode_rewards = []
     eval_win_rates = []
     obs = envs.reset()[0]
+    collected = np.zeros((num_episodes,), dtype=np.bool_)
     while True:
-        actions = act_fn(params, obs)
+        if rnn_state is None:
+            actions = act_fn(params, obs)
+        else:
+            rnn_state, actions = act_fn(params, (rnn_state, obs))
         actions = np.array(actions)
 
         obs, rewards, dones, info = envs.step(actions)
 
         for idx, d in enumerate(dones):
-            if not d:
+            if not d or collected[idx]:
                 continue
+            collected[idx] = True
             episode_length = info['l'][idx]
             episode_reward = info['r'][idx]
             win = 1 if episode_reward > 0 else 0

@@ -320,3 +320,62 @@ class PPOAgent(nn.Module):
         logits = actor(f_state, f_actions, mask)
         value = critic(f_state)
         return logits, value, valid
+
+
+class PPOLSTMAgent(nn.Module):
+    channels: int = 128
+    num_layers: int = 2
+    lstm_channels: int = 512
+    embedding_shape: Optional[Union[int, Tuple[int, int]]] = None
+    dtype: jnp.dtype = jnp.float32
+    param_dtype: jnp.dtype = jnp.float32
+    multi_step: bool = False
+
+    @nn.compact
+    def __call__(self, inputs):
+        if self.multi_step:
+            # (num_steps * batch_size, ...)
+            carry1, carry2, x, done, switch = inputs
+            batch_size = carry1[0].shape[0]
+            num_steps = done.shape[0] // batch_size
+        else:
+            carry, x = inputs
+
+        c = self.channels
+        encoder = Encoder(
+            channels=c,
+            num_layers=self.num_layers,
+            embedding_shape=self.embedding_shape,
+            dtype=self.dtype,
+            param_dtype=self.param_dtype,
+        )
+
+        f_actions, f_state, mask, valid = encoder(x)
+
+        lstm_layer = nn.OptimizedLSTMCell(
+            self.lstm_channels, dtype=self.dtype, param_dtype=self.param_dtype, kernel_init=nn.initializers.orthogonal(1.0))
+        if self.multi_step:
+            def body_fn(cell, carry, x, done, switch):
+                carry, init_carry = carry
+                carry, y = cell(carry, x)
+                carry = jax.tree.map(lambda x: jnp.where(done[:, None], 0, x), carry)
+                carry = jax.tree.map(lambda x, y: jnp.where(switch[:, None], x, y), init_carry, carry)
+                return (carry, init_carry), y
+            scan = nn.scan(
+                body_fn, variable_broadcast='params',
+                split_rngs={'params': False})
+            f_state, done, switch = jax.tree.map(
+                lambda x: jnp.reshape(x, (num_steps, batch_size) + x.shape[1:]), (f_state, done, switch))
+            carry, f_state = scan(lstm_layer, (carry1, carry2), f_state, done, switch)
+            f_state = f_state.reshape((-1, f_state.shape[-1]))
+        else:
+            carry, f_state = lstm_layer(carry, f_state)
+
+        actor = Actor(
+            channels=c, dtype=jnp.float32, param_dtype=self.param_dtype)
+        critic = Critic(
+            channels=[c, c, c], dtype=self.dtype, param_dtype=self.param_dtype)
+
+        logits = actor(f_state, f_actions, mask)
+        value = critic(f_state)
+        return carry, logits, value, valid

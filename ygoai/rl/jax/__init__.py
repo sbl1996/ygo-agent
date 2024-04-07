@@ -95,6 +95,69 @@ def clipped_surrogate_pg_loss(prob_ratios_t, adv_t, mask, epsilon, use_stop_grad
     return -jnp.mean(clipped_objective * mask)
 
 
+@partial(jax.jit, static_argnums=(6, 7))
+def compute_gae_2p0s(
+    next_value, next_done, values, rewards, dones, switch,
+    gamma, gae_lambda,
+):
+    def body_fn(carry, inp):
+        pred_values, next_values, lastgaelam = carry
+        next_done, curvalues, reward, switch = inp
+        nextnonterminal = 1.0 - next_done
+
+        next_values = jnp.where(switch, -pred_values, next_values)
+        lastgaelam = jnp.where(switch, 0, lastgaelam)
+
+        delta = reward + gamma * next_values * nextnonterminal - curvalues
+        lastgaelam = delta + gamma * gae_lambda * nextnonterminal * lastgaelam
+        return (pred_values, curvalues, lastgaelam), lastgaelam
+
+    dones = jnp.concatenate([dones, next_done[None, :]], axis=0)
+
+    lastgaelam = jnp.zeros_like(next_value)
+    carry = next_value, next_value, lastgaelam
+
+    _, advantages = jax.lax.scan(
+        body_fn, carry, (dones[1:], values, rewards, switch), reverse=True
+    )
+    target_values = advantages + values
+    return advantages, target_values
+
+
+@partial(jax.jit, static_argnums=(6, 7))
+def compute_gae_upgo_2p0s(
+    next_value, next_done, values, rewards, dones, switch,
+    gamma, gae_lambda,
+):
+    def body_fn(carry, inp):
+        pred_value, next_value, next_q, last_return, lastgaelam = carry
+        next_done, curvalues, reward, switch = inp
+        gamma_ = gamma * (1.0 - next_done)
+
+        next_value = jnp.where(switch, -pred_value, next_value)
+        next_q = jnp.where(switch, -pred_value, next_q)
+        last_return = jnp.where(switch, -pred_value, last_return)
+        lastgaelam = jnp.where(switch, 0, lastgaelam)
+
+        last_return = reward + gamma_ * jnp.where(
+            next_q >= next_value, last_return, next_value)
+        next_q = reward + gamma_ * next_value
+        delta = next_q - curvalues
+        lastgaelam = delta + gae_lambda * gamma_ * lastgaelam
+        
+        carry = pred_value, next_value, next_q, last_return, lastgaelam
+        return carry, (lastgaelam, last_return)
+
+    dones = jnp.concatenate([dones, next_done[None, :]], axis=0)
+
+    lastgaelam = jnp.zeros_like(next_value)
+    carry = next_value, next_value, next_value, next_value, lastgaelam
+
+    _, (advantages, returns) = jax.lax.scan(
+        body_fn, carry, (dones[1:], values, rewards, switch), reverse=True
+    )
+    return returns - values, advantages + values
+
 
 def compute_gae_once(carry, inp, gamma, gae_lambda):
     nextvalues1, nextvalues2, done_used1, done_used2, reward1, reward2, lastgaelam1, lastgaelam2 = carry

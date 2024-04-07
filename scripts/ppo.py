@@ -74,8 +74,15 @@ class Args:
     """Toggle learning rate annealing for policy and value networks"""
     gamma: float = 1.0
     """the discount factor gamma"""
-    gae_lambda: float = 0.98
+    gae_lambda: float = 0.95
     """the lambda for the general advantage estimation"""
+
+    fix_target: bool = False
+    """if toggled, the target network will be fixed"""
+    update_win_rate: float = 0.55
+    """the required win rate to update the agent"""
+    update_return: float = 0.1
+    """the required return to update the agent"""
 
     minibatch_size: int = 256
     """the mini-batch size"""
@@ -93,8 +100,6 @@ class Args:
     """coefficient of the value function"""
     max_grad_norm: float = 1.0
     """the maximum norm for the gradient clipping"""
-    learn_opponent: bool = False
-    """if toggled, the samples from the opponent will be used to train the agent"""
     collect_length: Optional[int] = None
     """the length of the buffer, only the first `num_steps` will be used for training (partial GAE)"""
 
@@ -169,6 +174,7 @@ def main():
     args.local_minibatch_size = int(args.minibatch_size // args.world_size)
     args.batch_size = int(args.num_envs * args.num_steps)
     args.num_iterations = args.total_timesteps // args.batch_size
+    args.num_minibatches = args.local_batch_size // args.local_minibatch_size
     args.env_threads = args.env_threads or args.num_envs
     args.torch_threads = args.torch_threads or (int(os.getenv("OMP_NUM_THREADS", "2")) * args.world_size)
     args.collect_length = args.collect_length or args.num_steps
@@ -247,6 +253,13 @@ def main():
     if args.embedding_file:
         agent.freeze_embeddings()
 
+    if args.fix_target:
+        agent_t = Agent(args.num_channels, L, L, embedding_shape).to(device)
+        agent_t.eval()
+        agent_t.load_state_dict(agent.state_dict())
+    else:
+        agent_t = agent
+
     optim_params = list(agent.parameters())
     optimizer = optim.Adam(optim_params, lr=args.learning_rate, eps=1e-5)
 
@@ -265,10 +278,16 @@ def main():
         example_obs = create_obs(envs.observation_space, (args.local_num_envs,), device=device)
         with torch.no_grad():
             traced_model = torch.jit.trace(agent, (example_obs,), check_tolerance=False, check_trace=False)
+            if args.fix_target:
+                traced_model_t = torch.jit.trace(agent_t, (example_obs,), check_tolerance=False, check_trace=False)
+                traced_model_t = torch.jit.optimize_for_inference(traced_model_t)
+            else:
+                traced_model_t = traced_model
 
         train_step = torch.compile(train_step, mode=args.compile)
     else:
         traced_model = agent
+        traced_model_t = agent_t
 
     # ALGO Logic: Storage setup
     obs = create_obs(obs_space, (args.collect_length, args.local_num_envs), device)
@@ -280,6 +299,7 @@ def main():
     learns = torch.zeros((args.collect_length, args.local_num_envs), dtype=torch.bool).to(device)
     avg_ep_returns = deque(maxlen=1000)
     avg_win_rates = deque(maxlen=1000)
+    version = 0
 
     # TRY NOT TO MODIFY: start the game
     global_step = 0
@@ -296,7 +316,6 @@ def main():
     ])
     np.random.shuffle(ai_player1_)
     ai_player1 = to_tensor(ai_player1_, device, dtype=next_to_play.dtype)
-    next_value1 = next_value2 = 0
     step = 0
 
     for iteration in range(args.num_iterations):
@@ -320,6 +339,10 @@ def main():
 
             _start = time.time()
             logits, value = predict_step(traced_model, next_obs)
+            if args.fix_target:
+                logits_t, value_t = predict_step(traced_model_t, next_obs)
+                logits = torch.where(learn[:, None], logits, logits_t)
+                value = torch.where(learn[:, None], value, value_t)
             value = value.flatten()
             probs = Categorical(logits=logits)
             action = probs.sample()
@@ -330,10 +353,6 @@ def main():
             logprobs[step] = logprob
             action = action.cpu().numpy()
             model_time += time.time() - _start
-
-            next_nonterminal = 1 - next_done.float()
-            next_value1 = torch.where(learn, value, next_value1) * next_nonterminal
-            next_value2 = torch.where(learn, next_value2, value) * next_nonterminal
 
             _start = time.time()
             to_play = next_to_play_
@@ -378,8 +397,12 @@ def main():
         # bootstrap value if not done
         with torch.no_grad():
             value = predict_step(traced_model, next_obs)[1].reshape(-1)
-        nextvalues1 = torch.where(next_to_play == ai_player1, value, next_value1)
-        nextvalues2 = torch.where(next_to_play != ai_player1, value, next_value2)
+            nextvalues1 = torch.where(next_to_play == ai_player1, value, -value)
+            if args.fix_target:
+                value_t = predict_step(traced_model_t, next_obs)[1].reshape(-1)
+                nextvalues2 = torch.where(next_to_play != ai_player1, value_t, -value_t)
+            else:
+                nextvalues2 = -nextvalues1
 
         if step > 0 and iteration != 0:
             # recalculate the values for the first few steps
@@ -409,10 +432,10 @@ def main():
         b_advantages = advantages[:args.num_steps].reshape(-1)
         b_values = values[:args.num_steps].reshape(-1)
         b_returns = b_advantages + b_values
-        if args.learn_opponent:
-            b_learns = torch.ones_like(b_values, dtype=torch.bool)
-        else:
+        if args.fix_target:
             b_learns = learns[:args.num_steps].reshape(-1)
+        else:
+            b_learns = torch.ones_like(b_values, dtype=torch.bool)
 
         # Optimizing the policy and value network
         b_inds = np.arange(args.local_batch_size)
@@ -475,6 +498,28 @@ def main():
                 fprint(f"SPS: {SPS}")
             if rank == 0:
                 writer.add_scalar("charts/SPS", SPS, global_step)
+
+        if args.fix_target:
+            if rank == 0:
+                should_update = len(avg_win_rates) == 1000 and np.mean(avg_win_rates) > args.update_win_rate and np.mean(avg_ep_returns) > args.update_return
+                should_update = torch.tensor(int(should_update), dtype=torch.int64, device=device)
+            else:
+                should_update = torch.zeros((), dtype=torch.int64, device=device)
+            if args.world_size > 1:
+                dist.all_reduce(should_update, op=dist.ReduceOp.SUM)
+            should_update = should_update.item() > 0
+            if should_update:
+                agent_t.load_state_dict(agent.state_dict())
+                with torch.no_grad():
+                    traced_model_t = torch.jit.trace(agent_t, (example_obs,), check_tolerance=False, check_trace=False)
+                    traced_model_t = torch.jit.optimize_for_inference(traced_model_t)
+
+                version += 1
+                if rank == 0:
+                    torch.save(agent.state_dict(), os.path.join(ckpt_dir, f"agent_v{version}.pt"))
+                    print(f"Updating agent at global_step={global_step} with win_rate={np.mean(avg_win_rates)}")
+                    avg_win_rates.clear()
+                    avg_ep_returns.clear()
 
         if args.eval_interval and iteration % args.eval_interval == 0:
             # Eval with rule-based policy
