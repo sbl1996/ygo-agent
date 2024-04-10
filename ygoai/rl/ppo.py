@@ -121,53 +121,6 @@ def train_step_t(agent, optimizer, b_obs, b_actions, b_logprobs, b_advantages, b
     return old_approx_kl, approx_kl, clipfrac, pg_loss, v_loss, entropy_loss
 
 
-# def train_step_t(agent, optimizer, mb_obs, mb_actions, mb_logprobs, mb_advantages, mb_returns, mb_values, mb_learns, args):
-#     logits, newvalue, valid = agent(mb_obs)
-#     logits = logits - logits.logsumexp(dim=-1, keepdim=True)
-#     newlogprob = logits.gather(-1, mb_actions[:, None]).squeeze(-1)
-#     entropy = entropy_from_logits(logits)
-#     valid = torch.logical_and(valid, mb_learns)
-#     logratio = newlogprob - mb_logprobs
-#     ratio = logratio.exp()
-
-#     with torch.no_grad():
-#         # calculate approx_kl http://joschu.net/blog/kl-approx.html
-#         old_approx_kl = (-logratio).mean()
-#         approx_kl = ((ratio - 1) - logratio).mean()
-#         clipfrac = ((ratio - 1.0).abs() > args.clip_coef).float().mean()
-
-#     if args.norm_adv:
-#         mb_advantages = masked_normalize(mb_advantages, valid, eps=1e-8)
-
-#     # Policy loss
-#     pg_loss1 = -mb_advantages * ratio
-#     pg_loss2 = -mb_advantages * torch.clamp(ratio, 1 - args.clip_coef, 1 + args.clip_coef)
-#     pg_loss = torch.max(pg_loss1, pg_loss2)
-#     pg_loss = masked_mean(pg_loss, valid)
-
-#     # Value loss
-#     newvalue = newvalue.view(-1)
-#     if args.clip_vloss:
-#         v_loss_unclipped = (newvalue - mb_returns) ** 2
-#         v_clipped = mb_values + torch.clamp(
-#             newvalue - mb_values,
-#             -args.clip_coef,
-#             args.clip_coef,
-#         )
-#         v_loss_clipped = (v_clipped - mb_returns) ** 2
-#         v_loss_max = torch.max(v_loss_unclipped, v_loss_clipped)
-#         v_loss = 0.5 * v_loss_max
-#     else:
-#         v_loss = 0.5 * ((newvalue - mb_returns) ** 2)
-#     v_loss = masked_mean(v_loss, valid)
-
-#     entropy_loss = masked_mean(entropy, valid)
-#     loss = pg_loss - args.ent_coef * entropy_loss + v_loss * args.vf_coef
-#     loss.backward()
-#     optimizer.step()
-#     return old_approx_kl, approx_kl, clipfrac, pg_loss, v_loss, entropy_loss
-
-
 def bootstrap_value(values, rewards, dones, nextvalues, next_done, gamma, gae_lambda):
     num_steps = rewards.size(0)
     advantages = torch.zeros_like(rewards)

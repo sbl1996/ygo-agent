@@ -312,7 +312,7 @@ def rollout(
         params_queue_get_time.append(time.time() - params_queue_get_time_start)
 
         rollout_time_start = time.time()
-        initial_rstate1, initial_rstate2 = jax.tree.map(
+        init_rstate1, init_rstate2 = jax.tree.map(
             lambda x: x.copy(), (next_rstate1, next_rstate2))
         for _ in range(start_step, args.collect_length):
             global_step += args.local_num_envs * n_actors * args.world_size
@@ -385,15 +385,10 @@ def rollout(
         next_main = main_player == next_to_play
         next_rstate = jax.tree.map(
             lambda x1, x2: jnp.where(next_main[:, None], x1, x2), next_rstate1, next_rstate2)
-        # initial_rstate1: main, initial_rstate2: opponent
-        # init rstate1: == next_main, init rstate2: != next_main
-        init_rstate1 = jax.tree.map(
-            lambda x, y: jnp.where(next_main[:, None], x, y), initial_rstate1, initial_rstate2)
-        init_rstate2 = jax.tree.map(
-            lambda x, y: jnp.where(next_main[:, None], y, x), initial_rstate1, initial_rstate2)
         sharded_data = jax.tree.map(lambda x: jax.device_put_sharded(
                 np.split(x, len(learner_devices)), devices=learner_devices),
                          (next_obs, next_rstate, init_rstate1, init_rstate2, next_done, next_main))
+        learn_opponent = False
         payload = (
             global_step,
             actor_policy_version,
@@ -402,6 +397,7 @@ def rollout(
             *sharded_data,
             np.mean(params_queue_get_time),
             device_thread_id,
+            learn_opponent,
         )
         rollout_queue.put(payload)
 
@@ -565,9 +561,10 @@ if __name__ == "__main__":
         return logprob, probs, entropy, value.squeeze(), valid
 
     def ppo_loss(
-        params, inputs, actions, logprobs, probs, advantages, target_values):
+        params, inputs, actions, logprobs, probs, advantages, target_values, mask):
         newlogprob, newprobs, entropy, newvalue, valid = \
             get_logprob_entropy_value(params, inputs, actions)
+        valid = valid & mask
         logratio = newlogprob - logprobs
         ratio = jnp.exp(logratio)
         approx_kl = ((ratio - 1) - logratio).mean()
@@ -600,7 +597,6 @@ if __name__ == "__main__":
         loss = pg_loss - args.ent_coef * entropy_loss + v_loss * args.vf_coef
         return loss, (pg_loss, v_loss, entropy_loss, jax.lax.stop_gradient(approx_kl))
 
-    @jax.jit
     def single_device_update(
         agent_state: TrainState,
         sharded_storages: List,
@@ -611,11 +607,12 @@ if __name__ == "__main__":
         sharded_next_done: List,
         sharded_next_main: List,
         key: jax.random.PRNGKey,
+        learn_opponent: bool = False,
     ):
-        def reshape_minibatch(x, num_minibatches, multi_step=False):
+        def reshape_minibatch(x, num_minibatches, num_steps=1):
             N = num_minibatches
-            if multi_step:
-                x = jnp.reshape(x, (args.num_steps, N, -1) + x.shape[2:])
+            if num_steps > 1:
+                x = jnp.reshape(x, (num_steps, N, -1) + x.shape[2:])
                 x = x.transpose(1, 0, *range(2, x.ndim))
                 x = x.reshape(N, -1, *x.shape[3:])
             else:
@@ -632,21 +629,37 @@ if __name__ == "__main__":
         ]
 
         # reorder storage of individual players
+        # main first, opponent second
         num_steps, num_envs = storage.rewards.shape
         T = jnp.arange(num_steps, dtype=jnp.int32)
         B = jnp.arange(num_envs, dtype=jnp.int32)
-        mains = (storage.mains == next_main).astype(jnp.int32)
-        indices = jnp.argsort(T[:, None] + mains * num_steps, axis=0)
-        switch = T[:, None] == (num_steps - 1 - jnp.sum(mains, axis=0))
+        mains = storage.mains.astype(jnp.int32)
+        indices = jnp.argsort(T[:, None] - mains * num_steps, axis=0)
+        switch_steps = jnp.sum(mains, axis=0)
+        switch = T[:, None] == (switch_steps[None, :] - 1)
+
+        if not learn_opponent:
+            num_steps = int(num_steps * 0.75)
+            indices = indices[:num_steps + 1]
+            switch = switch[:num_steps]
+
         storage = jax.tree.map(lambda x: x[indices, B[None, :]], storage)
+        if not learn_opponent:
+            next_obs = jax.tree.map(lambda x: x[num_steps], storage.obs)
+            next_done = storage.dones[num_steps]
+            next_main = storage.mains[num_steps]
+            storage = jax.tree.map(lambda x: x[:num_steps], storage)
 
         # split minibatches for recompute values
-        n_mbs = args.num_minibatches // 4
+        num_minibatches = args.num_minibatches
+        if not learn_opponent:
+            num_minibatches = num_minibatches // 2
+        n_mbs = num_minibatches // 4
         split_init_rstate = jax.tree.map(
             partial(reshape_minibatch, num_minibatches=n_mbs),
             (init_rstate1, init_rstate2))
         split_inputs = jax.tree.map(
-            partial(reshape_minibatch, num_minibatches=n_mbs, multi_step=True),
+            partial(reshape_minibatch, num_minibatches=n_mbs, num_steps=num_steps),
             (storage.obs, storage.dones, switch))
         split_inputs = split_init_rstate + split_inputs
 
@@ -663,27 +676,32 @@ if __name__ == "__main__":
 
             _, values = jax.lax.scan(
                 get_value_minibatch, agent_state, split_inputs)
-            values = values.reshape((n_mbs, args.num_steps, -1)).transpose(1, 0, 2)
+            values = values.reshape((n_mbs, num_steps, -1)).transpose(1, 0, 2)
             values = values.reshape(storage.rewards.shape)
 
             next_value = create_agent(args).apply(
                 agent_state.params, (next_rstate, next_obs))[2].squeeze(-1)
+            # TODO: check if this is correct
+            sign = jnp.where(switch_steps <= num_steps, 1.0, -1.0)
+            next_value = jnp.where(next_main, -sign * next_value, sign * next_value)
 
             compute_gae_fn = compute_gae_upgo_2p0s if args.upgo else compute_gae_2p0s
             advantages, target_values = compute_gae_fn(
                 next_value, next_done, values, storage.rewards, storage.dones, switch,
                 args.gamma, args.gae_lambda)
-            advantages = advantages[:args.num_steps]
-            target_values = target_values[:args.num_steps]
 
-            def convert_data(x: jnp.ndarray, multi_step):
+            def convert_data(x: jnp.ndarray, num_steps):
                 x = jax.random.permutation(subkey, x, axis=1)
-                return reshape_minibatch(x, args.num_minibatches, multi_step)
+                return reshape_minibatch(x, num_minibatches, num_steps)
 
             shuffled_init_rstate1, shuffled_init_rstate2 = jax.tree.map(
-                partial(convert_data, multi_step=False), (init_rstate1, init_rstate2))
+                partial(convert_data, num_steps=1), (init_rstate1, init_rstate2))
             shuffled_storage, shuffled_switch, shuffled_advantages, shuffled_target_values = jax.tree.map(
-                partial(convert_data, multi_step=True), (storage, switch, advantages, target_values))
+                partial(convert_data, num_steps=num_steps), (storage, switch, advantages, target_values))
+            if learn_opponent:
+                shuffled_mask = jnp.ones_like(shuffled_storage.mains)
+            else:
+                shuffled_mask = shuffled_storage.mains
 
             def update_minibatch(agent_state, minibatch):
                 (loss, (pg_loss, v_loss, entropy_loss, approx_kl)), grads = ppo_loss_grad_fn(
@@ -708,6 +726,7 @@ if __name__ == "__main__":
                     shuffled_storage.probs,
                     shuffled_advantages,
                     shuffled_target_values,
+                    shuffled_mask,
                 ),
             )
             return (agent_state, key), (loss, pg_loss, v_loss, entropy_loss, approx_kl)
@@ -726,6 +745,7 @@ if __name__ == "__main__":
         single_device_update,
         axis_name="local_devices",
         devices=global_learner_decices,
+        static_broadcasted_argnums=(9,),
     )
 
     params_queues = []
@@ -771,6 +791,7 @@ if __name__ == "__main__":
                     *sharded_data,
                     avg_params_queue_get_time,
                     device_thread_id,
+                    learn_opponent,
                 ) = rollout_queues[d_idx * args.num_actor_threads + thread_id].get()
                 sharded_data_list.append(sharded_data)
         rollout_queue_get_time.append(time.time() - rollout_queue_get_time_start)
@@ -779,6 +800,7 @@ if __name__ == "__main__":
             agent_state,
             *list(zip(*sharded_data_list)),
             learner_keys,
+            learn_opponent,
         )
         unreplicated_params = flax.jax_utils.unreplicate(agent_state.params)
         for d_idx, d_id in enumerate(args.actor_device_ids):

@@ -8,12 +8,15 @@ from dataclasses import dataclass
 import ygoenv
 import numpy as np
 
-import optree
-
 import tyro
+
+import jax
+import jax.numpy as jnp
+import flax
 
 from ygoai.utils import init_ygopro
 from ygoai.rl.utils import RecordEpisodeStatistics
+from ygoai.rl.jax.agent2 import PPOLSTMAgent
 
 
 @dataclass
@@ -54,6 +57,8 @@ class Args:
     """the number of layers for the agent"""
     num_channels: int = 128
     """the number of channels for the agent"""
+    rnn_channels: Optional[int] = 512
+    """the number of rnn channels for the agent"""
     checkpoint1: str = "checkpoints/agent.pt"
     """the checkpoint to load for the first agent, `pt` or `flax_model` file"""
     checkpoint2: str = "checkpoints/agent.pt"
@@ -81,7 +86,26 @@ class Args:
     framework: Optional[Literal["torch", "jax"]] = None
 
 
+def create_agent(args):
+    return PPOLSTMAgent(
+        channels=args.num_channels,
+        num_layers=args.num_layers,
+        lstm_channels=args.rnn_channels,
+        embedding_shape=args.num_embeddings,
+    )
+
+
+def init_rnn_state(num_envs, rnn_channels):
+    return (
+        np.zeros((num_envs, rnn_channels)),
+        np.zeros((num_envs, rnn_channels)),
+    )
+
+
 if __name__ == "__main__":
+    from jax.experimental.compilation_cache import compilation_cache as cc
+    cc.set_cache_dir(os.path.expanduser("~/.cache/jax"))
+
     args = tyro.cli(Args)
 
     if args.record:
@@ -101,20 +125,8 @@ if __name__ == "__main__":
     random.seed(seed)
     np.random.seed(seed)
 
-    if args.framework is None:
-        args.framework = "jax" if "flax_model" in args.checkpoint1 else "torch"
-
-    if args.framework == "torch":
-        import torch
-        torch.manual_seed(args.seed)
-        torch.backends.cudnn.deterministic = args.torch_deterministic
-
-        args.torch_threads = args.torch_threads or int(os.getenv("OMP_NUM_THREADS", "4"))
-        torch.set_num_threads(args.torch_threads)
-        torch.set_float32_matmul_precision('high')
-    else:
-        if args.xla_device is not None:
-            os.environ.setdefault("JAX_PLATFORMS", args.xla_device)
+    if args.xla_device is not None:
+        os.environ.setdefault("JAX_PLATFORMS", args.xla_device)
 
     num_envs = args.num_envs
 
@@ -138,113 +150,57 @@ if __name__ == "__main__":
     envs.num_envs = num_envs
     envs = RecordEpisodeStatistics(envs)
 
-    if args.framework == 'torch':
-        from ygoai.rl.agent import PPOAgent as Agent
-        from ygoai.rl.buffer import create_obs
+    agent = create_agent(args)
+    key = jax.random.PRNGKey(args.seed)
+    key, agent_key = jax.random.split(key, 2)
+    sample_obs = jax.tree_map(lambda x: jnp.array([x]), obs_space.sample())
 
-        device = torch.device("cuda" if torch.cuda.is_available() and args.cuda else "cpu")
+    rstate = init_rnn_state(1, args.rnn_channels)
+    params = jax.jit(agent.init)(agent_key, (rstate, sample_obs))
 
-        if args.checkpoint1.endswith(".ptj"):
-            agent1 = torch.jit.load(args.checkpoint1)
-            agent2 = torch.jit.load(args.checkpoint2)
-        else:
-            # count lines of code_list
-            embedding_shape = args.num_embeddings
-            if embedding_shape is None:
-                with open(args.code_list_file, "r") as f:
-                    code_list = f.readlines()
-                    embedding_shape = len(code_list)
-            L = args.num_layers
-            agent1 = Agent(args.num_channels, L, L, embedding_shape).to(device)
-            agent2 = Agent(args.num_channels, L, L, embedding_shape).to(device)
-
-            for agent, ckpt in zip([agent1, agent2], [args.checkpoint1, args.checkpoint2]):
-                state_dict = torch.load(ckpt, map_location=device)
-                if not args.compile:
-                    prefix = "_orig_mod."
-                    state_dict = {k[len(prefix):] if k.startswith(prefix) else k: v for k, v in state_dict.items()}
-                print(agent.load_state_dict(state_dict))
-
-            def get_probs(agent, obs):
-                with torch.no_grad():
-                    return torch.softmax(agent(obs)[0], dim=-1)
-
-            if args.compile:
-                get_probs = torch.compile(get_probs, mode='reduce-overhead')
-            elif args.optimize:
-                obs = create_obs(envs.observation_space, (num_envs,), device=device)
-                def optimize_for_inference(agent):
-                    with torch.no_grad():
-                        traced_model = torch.jit.trace(agent, (obs,), check_tolerance=False, check_trace=False)
-                        return torch.jit.optimize_for_inference(traced_model)
-                agent1 = optimize_for_inference(agent1)
-                agent2 = optimize_for_inference(agent2)
-            
-            def predict_fn(obs, main):
-                obs = optree.tree_map(lambda x: torch.from_numpy(x).to(device=device), obs)
-                if num_envs != 1:
-                    probs1 = get_probs(agent, obs)
-                    probs2 = get_probs(agent, obs)
-                    probs = torch.where(main[:, None], probs1, probs2)
-                else:
-                    if main[0]:
-                        probs = get_probs(agent1, obs)
-                    else:
-                        probs = get_probs(agent2, obs)
-                probs = probs.cpu().numpy()
-                return probs
+    with open(args.checkpoint1, "rb") as f:
+        params1 = flax.serialization.from_bytes(params, f.read())
+    if args.checkpoint1 == args.checkpoint2:
+        params2 = params1
     else:
-        import jax
-        import jax.numpy as jnp
-        import flax
-        from ygoai.rl.jax.agent2 import PPOAgent
-        def create_agent(args):
-            return PPOAgent(
-                channels=128,
-                num_layers=2,
-                embedding_shape=args.num_embeddings,
-            )
+        with open(args.checkpoint2, "rb") as f:
+            params2 = flax.serialization.from_bytes(params, f.read())
+
+    @jax.jit
+    def get_probs(params, rstate, obs, done):
         agent = create_agent(args)
-        key = jax.random.PRNGKey(args.seed)
-        key, agent_key = jax.random.split(key, 2)
-        sample_obs = jax.tree_map(lambda x: jnp.array([x]), obs_space.sample())
-        params = agent.init(agent_key, sample_obs)
-        print(jax.tree.leaves(params)[0].devices())
-        with open(args.checkpoint1, "rb") as f:
-            params1 = flax.serialization.from_bytes(params, f.read())
-        if args.checkpoint1 == args.checkpoint2:
-            params2 = params1
-        else:
-            with open(args.checkpoint2, "rb") as f:
-                params2 = flax.serialization.from_bytes(params, f.read())
+        next_rstate, logits = agent.apply(params, (rstate, obs))[:2]
+        probs = jax.nn.softmax(logits, axis=-1)
+        next_rstate = jax.tree_map(
+            lambda x: jnp.where(done[:, None], 0, x), next_rstate)
+        return next_rstate, probs
 
+    if args.num_envs != 1:
         @jax.jit
-        def get_probs(params, obs):
-            agent = create_agent(args)
-            logits = agent.apply(params, obs)[0]
-            return jax.nn.softmax(logits, axis=-1)
+        def get_probs2(params1, params2, rstate1, rstate2, obs, main, done):
+            next_rstate1, probs1 = get_probs(params1, rstate1, obs, done)
+            next_rstate2, probs2 = get_probs(params2, rstate2, obs, done)
+            probs = jnp.where(main[:, None], probs1, probs2)
+            rstate1 = jax.tree.map(
+                lambda x1, x2: jnp.where(main[:, None], x1, x2), next_rstate1, rstate1)
+            rstate2 = jax.tree.map(
+                lambda x1, x2: jnp.where(main[:, None], x2, x1), next_rstate2, rstate2)
+            return rstate1, rstate2, probs
 
-        if args.num_envs != 1:
-            @jax.jit
-            def get_probs2(params1, params2, obs, main):
-                probs1 = get_probs(params1, obs)
-                probs2 = get_probs(params2, obs)
-                probs = jnp.where(main[:, None], probs1, probs2)
-                return probs
+        def predict_fn(rstate1, rstate2, obs, main, done):
+            rstate1, rstate2, probs = get_probs2(params1, params2, rstate1, rstate2, obs, main, done)
+            return rstate1, rstate2, np.array(probs)
+    else:
+        def predict_fn(rstate1, rstate2, obs, main, done):
+            if main[0]:
+                rstate1, probs = get_probs(params1, rstate1, obs, done)
+            else:
+                rstate2, probs = get_probs(params2, rstate2, obs, done)
+            return rstate1, rstate2, np.array(probs)
 
-            def predict_fn(obs, main):
-                probs = get_probs2(params1, params2, obs, main)
-                return np.array(probs)
-        else:
-            def predict_fn(obs, main):
-                if main[0]:
-                    probs = get_probs(params1, obs)
-                else:
-                    probs = get_probs(params2, obs)
-                return np.array(probs)
-        
     obs, infos = envs.reset()
     next_to_play = infos['to_play']
+    dones = np.zeros(num_envs, dtype=np.bool_)
 
     episode_rewards = []
     episode_lengths = []
@@ -259,6 +215,7 @@ if __name__ == "__main__":
         np.zeros(num_envs // 2, dtype=np.int64),
         np.ones(num_envs - num_envs // 2, dtype=np.int64)
     ])
+    rstate1 = rstate2 = init_rnn_state(num_envs, args.rnn_channels)
 
     model_time = env_time = 0
     while True:
@@ -268,9 +225,8 @@ if __name__ == "__main__":
             model_time = env_time = 0
 
         _start = time.time()
-
         main = next_to_play == main_player
-        probs = predict_fn(obs, main)
+        rstate1, rstate2, probs = predict_fn(rstate1, rstate2, obs, main, dones)
 
         actions = probs.argmax(axis=1)
         model_time += time.time() - _start

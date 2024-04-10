@@ -22,7 +22,7 @@ from ygoai.rl.utils import RecordEpisodeStatistics, to_tensor, load_embeddings
 from ygoai.rl.agent import PPOAgent as Agent
 from ygoai.rl.dist import reduce_gradidents, torchrun_setup, fprint
 from ygoai.rl.buffer import create_obs
-from ygoai.rl.ppo import bootstrap_value_selfplay
+from ygoai.rl.ppo import bootstrap_value_selfplay, train_step as train_step_
 from ygoai.rl.eval import evaluate
 
 
@@ -242,6 +242,7 @@ def main():
         embedding_shape = None
     L = args.num_layers
     agent = Agent(args.num_channels, L, L, embedding_shape).to(device)
+    torch.manual_seed(args.seed)
     agent.eval()
 
     if args.checkpoint:
@@ -271,7 +272,6 @@ def main():
                 logits, value, valid = agent(next_obs)
         return logits, value
 
-    from ygoai.rl.ppo import train_step
     if args.compile:
         # It seems that using torch.compile twice cause segfault at start, so we use torch.jit.trace here
         # predict_step = torch.compile(predict_step, mode=args.compile)
@@ -284,10 +284,11 @@ def main():
             else:
                 traced_model_t = traced_model
 
-        train_step = torch.compile(train_step, mode=args.compile)
+        train_step = torch.compile(train_step_, mode=args.compile)
     else:
         traced_model = agent
         traced_model_t = agent_t
+        train_step = train_step_
 
     # ALGO Logic: Storage setup
     obs = create_obs(obs_space, (args.collect_length, args.local_num_envs), device)
@@ -310,12 +311,12 @@ def main():
     next_to_play_ = info["to_play"]
     next_to_play = to_tensor(next_to_play_, device)
     next_done = torch.zeros(args.local_num_envs, device=device, dtype=torch.bool)
-    ai_player1_ = np.concatenate([
+    main_player_ = np.concatenate([
         np.zeros(args.local_num_envs // 2, dtype=np.int64),
         np.ones(args.local_num_envs // 2, dtype=np.int64)
     ])
-    np.random.shuffle(ai_player1_)
-    ai_player1 = to_tensor(ai_player1_, device, dtype=next_to_play.dtype)
+    np.random.shuffle(main_player_)
+    main_player = to_tensor(main_player_, device, dtype=next_to_play.dtype)
     step = 0
 
     for iteration in range(args.num_iterations):
@@ -334,7 +335,7 @@ def main():
             for key in obs:
                 obs[key][step] = next_obs[key]
             dones[step] = next_done
-            learn = next_to_play == ai_player1
+            learn = next_to_play == main_player
             learns[step] = learn
 
             _start = time.time()
@@ -369,7 +370,7 @@ def main():
 
             for idx, d in enumerate(next_done_):
                 if d:
-                    pl = 1 if to_play[idx] == ai_player1_[idx] else -1
+                    pl = 1 if to_play[idx] == main_player_[idx] else -1
                     episode_length = info['l'][idx]
                     episode_reward = info['r'][idx] * pl
                     win = 1 if episode_reward > 0 else 0
@@ -395,14 +396,13 @@ def main():
 
         _start = time.time()
         # bootstrap value if not done
-        with torch.no_grad():
-            value = predict_step(traced_model, next_obs)[1].reshape(-1)
-            nextvalues1 = torch.where(next_to_play == ai_player1, value, -value)
-            if args.fix_target:
-                value_t = predict_step(traced_model_t, next_obs)[1].reshape(-1)
-                nextvalues2 = torch.where(next_to_play != ai_player1, value_t, -value_t)
-            else:
-                nextvalues2 = -nextvalues1
+        value = predict_step(traced_model, next_obs)[1].reshape(-1)
+        nextvalues1 = torch.where(next_to_play == main_player, value, -value)
+        if args.fix_target:
+            value_t = predict_step(traced_model_t, next_obs)[1].reshape(-1)
+            nextvalues2 = torch.where(next_to_play != main_player, value_t, -value_t)
+        else:
+            nextvalues2 = -nextvalues1
 
         if step > 0 and iteration != 0:
             # recalculate the values for the first few steps

@@ -35,18 +35,6 @@ class RecordEpisodeStatistics(gym.Wrapper):
         self.episode_lengths *= 1 - dones
         infos["r"] = self.returned_episode_returns
         infos["l"] = self.returned_episode_lengths
-        # env_id = infos["env_id"]
-        # self.env_id = env_id
-        # self.episode_returns[env_id] += infos["reward"]
-        # self.returned_episode_returns[env_id] = np.where(
-        #     infos["terminated"] + truncated, self.episode_returns[env_id], self.returned_episode_returns[env_id]
-        # )
-        # self.episode_returns[env_id] *= (1 - infos["terminated"]) * (1 - truncated)
-        # self.episode_lengths[env_id] += 1
-        # self.returned_episode_lengths[env_id] = np.where(
-        #     infos["terminated"] + truncated, self.episode_lengths[env_id], self.returned_episode_lengths[env_id]
-        # )
-        # self.episode_lengths[env_id] *= (1 - infos["terminated"]) * (1 - truncated)
 
         return (
             observations,
