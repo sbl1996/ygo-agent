@@ -224,7 +224,7 @@ if __name__ == "__main__":
 
         key = jax.random.PRNGKey(args.seed)
         key, agent_key = jax.random.split(key, 2)
-        sample_obs = jax.tree_map(lambda x: jnp.array([x]), obs_space.sample())
+        sample_obs = jax.tree.map(lambda x: jnp.array([x]), obs_space.sample())
         params = agent.init(agent_key, sample_obs)
         with open(args.checkpoint, "rb") as f:
             params = flax.serialization.from_bytes(params, f.read())

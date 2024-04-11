@@ -153,7 +153,7 @@ if __name__ == "__main__":
     agent = create_agent(args)
     key = jax.random.PRNGKey(args.seed)
     key, agent_key = jax.random.split(key, 2)
-    sample_obs = jax.tree_map(lambda x: jnp.array([x]), obs_space.sample())
+    sample_obs = jax.tree.map(lambda x: jnp.array([x]), obs_space.sample())
 
     rstate = init_rnn_state(1, args.rnn_channels)
     params = jax.jit(agent.init)(agent_key, (rstate, sample_obs))
@@ -171,7 +171,7 @@ if __name__ == "__main__":
         agent = create_agent(args)
         next_rstate, logits = agent.apply(params, (rstate, obs))[:2]
         probs = jax.nn.softmax(logits, axis=-1)
-        next_rstate = jax.tree_map(
+        next_rstate = jax.tree.map(
             lambda x: jnp.where(done[:, None], 0, x), next_rstate)
         return next_rstate, probs
 
