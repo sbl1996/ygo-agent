@@ -25,7 +25,7 @@ from tensorboardX import SummaryWriter
 from ygoai.utils import init_ygopro
 from ygoai.rl.jax.agent2 import PPOLSTMAgent
 from ygoai.rl.jax.utils import RecordEpisodeStatistics, masked_normalize, categorical_sample
-from ygoai.rl.jax.eval import evaluate
+from ygoai.rl.jax.eval import evaluate, battle
 from ygoai.rl.jax import compute_gae_upgo_2p0s, compute_gae_2p0s
 
 
@@ -122,6 +122,8 @@ class Args:
     thread_affinity: bool = False
     """whether to use thread affinity for the environment"""
 
+    eval_checkpoint: Optional[str] = None
+    """the path to the model checkpoint to evaluate"""
     local_eval_episodes: int = 32
     """the number of episodes to evaluate the model"""
     eval_interval: int = 50
@@ -198,12 +200,16 @@ def rollout(
     key: jax.random.PRNGKey,
     args: Args,
     rollout_queue,
-    params_queue: queue.Queue,
-    stats_queue,
+    params_queue,
+    eval_queue,
     writer,
     learner_devices,
     device_thread_id,
 ):
+    eval_mode = 'self' if args.eval_checkpoint else 'bot'
+    if eval_mode != 'bot':
+        eval_params = params_queue.get()
+
     envs = make_env(
         args,
         args.seed + jax.process_index() + device_thread_id,
@@ -217,7 +223,7 @@ def rollout(
         args,
         args.seed + jax.process_index() + device_thread_id,
         args.local_eval_episodes,
-        args.local_eval_episodes // 4, mode='bot')
+        args.local_eval_episodes // 4, mode=eval_mode)
     eval_envs = RecordEpisodeStatistics(eval_envs)
 
     len_actor_device_ids = len(args.actor_device_ids)
@@ -245,10 +251,22 @@ def rollout(
         return rstate, logits.argmax(axis=1)
 
     @jax.jit
+    def get_action_battle(params1, params2, rstate1, rstate2, obs, main, done):
+        next_rstate1, logits1 = get_logits(params1, (rstate1, obs), done)
+        next_rstate2, logits2 = get_logits(params2, (rstate2, obs), done)
+        logits = jnp.where(main[:, None], logits1, logits2)
+        rstate1 = jax.tree.map(
+            lambda x1, x2: jnp.where(main[:, None], x1, x2), next_rstate1, rstate1)
+        rstate2 = jax.tree.map(
+            lambda x1, x2: jnp.where(main[:, None], x2, x1), next_rstate2, rstate2)
+        return rstate1, rstate2, logits.argmax(axis=1)
+
+    @jax.jit
     def sample_action(
         params: flax.core.FrozenDict,
         next_obs, rstate1, rstate2, main, done, key):
         next_obs = jax.tree.map(lambda x: jnp.array(x), next_obs)
+        done = jnp.array(done)
         main = jnp.array(main)
         rstate = jax.tree.map(
             lambda x1, x2: jnp.where(main[:, None], x1, x2), rstate1, rstate2)
@@ -257,7 +275,7 @@ def rollout(
         rstate2 = jax.tree.map(lambda x, y: jnp.where(main[:, None], y, x), rstate, rstate2)
 
         action, key = categorical_sample(logits, key)
-        return next_obs, rstate1, rstate2, action, logits, key
+        return next_obs, done, main, rstate1, rstate2, action, logits, key
 
     # put data in the last index
     params_queue_get_time = deque(maxlen=10)
@@ -314,7 +332,8 @@ def rollout(
             main = next_to_play == main_player
 
             inference_time_start = time.time()
-            cached_next_obs, next_rstate1, next_rstate2, action, logits, key = sample_action(
+            cached_next_obs, cached_next_done, cached_main, \
+                next_rstate1, next_rstate2, action, logits, key = sample_action(
                 params, cached_next_obs, next_rstate1, next_rstate2, main, cached_next_done, key)
             
             cpu_action = np.array(action)
@@ -329,7 +348,7 @@ def rollout(
                 Transition(
                     obs=cached_next_obs,
                     dones=cached_next_done,
-                    mains=main,
+                    mains=cached_main,
                     actions=action,
                     logits=logits,
                     rewards=next_reward,
@@ -412,19 +431,28 @@ def rollout(
         if args.eval_interval and update % args.eval_interval == 0:
             # Eval with rule-based policy
             _start = time.time()
-            eval_return = evaluate(eval_envs, get_action, params, eval_rstate)[0]
+            if eval_mode == 'bot':
+                predict_fn = lambda x: get_action(params, x)
+                eval_stat = evaluate(
+                    eval_envs, args.local_eval_episodes, predict_fn, eval_rstate)[0]
+                metric_name = "eval_return"
+            else:
+                predict_fn = lambda *x: get_action_battle(params, eval_params, *x)
+                eval_stat = battle(
+                    eval_envs, args.local_eval_episodes, predict_fn, eval_rstate)[2]
+                metric_name = "eval_win_rate"
             if device_thread_id != 0:
-                stats_queue.put(eval_return)
+                eval_queue.put(eval_stat)
             else:
                 eval_stats = []
-                eval_stats.append(eval_return)
+                eval_stats.append(eval_stat)
                 for _ in range(1, n_actors):
-                    eval_stats.append(stats_queue.get())
+                    eval_stats.append(eval_queue.get())
                 eval_stats = np.mean(eval_stats)
-                writer.add_scalar("charts/eval_return", eval_stats, global_step)
+                writer.add_scalar(f"charts/{metric_name}", eval_stats, global_step)
                 if device_thread_id == 0:
                     eval_time = time.time() - _start
-                    print(f"eval_time={eval_time:.4f}, eval_ep_return={eval_stats:.4f}")
+                    print(f"eval_time={eval_time:.4f}, {metric_name}={eval_stats:.4f}")
                     other_time += eval_time
 
 
@@ -524,14 +552,23 @@ if __name__ == "__main__":
         params=params,
         tx=tx,
     )
+
+
     if args.checkpoint:
         with open(args.checkpoint, "rb") as f:
             params = flax.serialization.from_bytes(params, f.read())
             agent_state = agent_state.replace(params=params)
         print(f"loaded checkpoint from {args.checkpoint}")
-
+    
     agent_state = flax.jax_utils.replicate(agent_state, devices=learner_devices)
     # print(agent.tabulate(agent_key, sample_obs))
+
+    if args.eval_checkpoint:
+        with open(args.eval_checkpoint, "rb") as f:
+            eval_params = flax.serialization.from_bytes(params, f.read())
+        print(f"loaded eval checkpoint from {args.eval_checkpoint}")
+    else:
+        eval_params = None
 
     @jax.jit
     def get_logits_and_value(
@@ -711,7 +748,7 @@ if __name__ == "__main__":
 
     params_queues = []
     rollout_queues = []
-    stats_queues = queue.Queue()
+    eval_queues = queue.Queue()
     dummy_writer = SimpleNamespace()
     dummy_writer.add_scalar = lambda x, y, z: None
 
@@ -721,7 +758,9 @@ if __name__ == "__main__":
         for thread_id in range(args.num_actor_threads):
             params_queues.append(queue.Queue(maxsize=1))
             rollout_queues.append(queue.Queue(maxsize=1))
-            params_queues[-1].put(device_params)
+            if eval_params:
+                params_queues[-1].put(
+                    jax.device_put(eval_params, local_devices[d_id]))                
             threading.Thread(
                 target=rollout,
                 args=(
@@ -729,12 +768,13 @@ if __name__ == "__main__":
                     args,
                     rollout_queues[-1],
                     params_queues[-1],
-                    stats_queues,
+                    eval_queues,
                     writer if d_idx == 0 and thread_id == 0 else dummy_writer,
                     learner_devices,
                     d_idx * args.num_actor_threads + thread_id,
                 ),
             ).start()
+            params_queues[-1].put(device_params)
 
     rollout_queue_get_time = deque(maxlen=10)
     data_transfer_time = deque(maxlen=10)

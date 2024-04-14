@@ -165,7 +165,10 @@ if __name__ == "__main__":
     else:
         with open(args.checkpoint2, "rb") as f:
             params2 = flax.serialization.from_bytes(params, f.read())
-
+    
+    params1 = jax.device_put(params1)
+    params2 = jax.device_put(params2)
+    
     @jax.jit
     def get_probs(params, rstate, obs, done):
         agent = create_agent(args)

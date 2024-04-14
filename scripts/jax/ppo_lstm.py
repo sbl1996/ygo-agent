@@ -23,7 +23,7 @@ from tensorboardX import SummaryWriter
 
 from ygoai.utils import init_ygopro
 from ygoai.rl.jax.agent2 import PPOLSTMAgent
-from ygoai.rl.jax.utils import RecordEpisodeStatistics, masked_mean, masked_normalize
+from ygoai.rl.jax.utils import RecordEpisodeStatistics, masked_mean, masked_normalize, categorical_sample
 from ygoai.rl.jax.eval import evaluate
 from ygoai.rl.jax import compute_gae_upgo_2p0s, compute_gae_2p0s
 
@@ -255,11 +255,7 @@ def rollout(
         rstate1 = jax.tree.map(lambda x, y: jnp.where(main[:, None], x, y), rstate, rstate1)
         rstate2 = jax.tree.map(lambda x, y: jnp.where(main[:, None], y, x), rstate, rstate2)
 
-        # sample action: Gumbel-softmax trick
-        # see https://stats.stackexchange.com/questions/359442/sampling-from-a-categorical-distribution
-        key, subkey = jax.random.split(key)
-        u = jax.random.uniform(subkey, shape=logits.shape)
-        action = jnp.argmax(logits - jnp.log(-jnp.log(u)), axis=1)
+        action, key = categorical_sample(logits, key)
         logprob = jax.nn.log_softmax(logits)[jnp.arange(action.shape[0]), action]
 
         logits = logits - jax.scipy.special.logsumexp(logits, axis=-1, keepdims=True)
@@ -329,7 +325,6 @@ def rollout(
             inference_time += time.time() - inference_time_start
 
             _start = time.time()
-            to_play = next_to_play
             next_obs, next_reward, next_done, info = envs.step(cpu_action)
             next_to_play = info["to_play"]
             env_time += time.time() - _start
@@ -338,11 +333,11 @@ def rollout(
                 Transition(
                     obs=cached_next_obs,
                     dones=cached_next_done,
+                    mains=main,
                     actions=action,
                     logprobs=logprob,
-                    rewards=next_reward,
-                    mains=main,
                     probs=probs,
+                    rewards=next_reward,
                 )
             )
 
@@ -359,8 +354,7 @@ def rollout(
                         t.dones[idx] = True
                         t.rewards[idx] = -next_reward[idx]
                         break
-                pl = 1 if to_play[idx] == main_player[idx] else -1
-                episode_reward = info['r'][idx] * pl
+                episode_reward = info['r'][idx] * (1 if cur_main else -1)
                 win = 1 if episode_reward > 0 else 0
                 avg_ep_returns.append(episode_reward)
                 avg_win_rates.append(win)
@@ -387,16 +381,14 @@ def rollout(
             lambda x1, x2: jnp.where(next_main[:, None], x1, x2), next_rstate1, next_rstate2)
         sharded_data = jax.tree.map(lambda x: jax.device_put_sharded(
                 np.split(x, len(learner_devices)), devices=learner_devices),
-                         (next_obs, next_rstate, init_rstate1, init_rstate2, next_done, next_main))
+                         (init_rstate1, init_rstate2, (next_rstate, next_obs), next_done, next_main))
         learn_opponent = False
         payload = (
             global_step,
-            actor_policy_version,
             update,
             sharded_storage,
             *sharded_data,
             np.mean(params_queue_get_time),
-            device_thread_id,
             learn_opponent,
         )
         rollout_queue.put(payload)
@@ -589,7 +581,6 @@ if __name__ == "__main__":
             pg_loss = jnp.maximum(pg_loss1, pg_loss2)
         pg_loss = masked_mean(pg_loss, valid)
 
-        # Value loss
         v_loss = 0.5 * ((newvalue - target_values) ** 2)
         v_loss = masked_mean(v_loss, valid)
 
@@ -600,10 +591,9 @@ if __name__ == "__main__":
     def single_device_update(
         agent_state: TrainState,
         sharded_storages: List,
-        sharded_next_obs: List,
-        sharded_next_rstate: List,
         sharded_init_rstate1: List,
         sharded_init_rstate2: List,
+        sharded_next_inputs: List,
         sharded_next_done: List,
         sharded_next_main: List,
         key: jax.random.PRNGKey,
@@ -620,9 +610,9 @@ if __name__ == "__main__":
             return x
 
         storage = jax.tree.map(lambda *x: jnp.hstack(x), *sharded_storages)
-        next_obs, next_rstate, init_rstate1, init_rstate2 = [
+        next_inputs, init_rstate1, init_rstate2 = [
             jax.tree.map(lambda *x: jnp.concatenate(x), *x)
-            for x in [sharded_next_obs, sharded_next_rstate, sharded_init_rstate1, sharded_init_rstate2]
+            for x in [sharded_next_inputs, sharded_init_rstate1, sharded_init_rstate2]
         ]
         next_done, next_main = [
             jnp.concatenate(x) for x in [sharded_next_done, sharded_next_main]
@@ -680,7 +670,7 @@ if __name__ == "__main__":
             values = values.reshape(storage.rewards.shape)
 
             next_value = create_agent(args).apply(
-                agent_state.params, (next_rstate, next_obs))[2].squeeze(-1)
+                agent_state.params, next_inputs)[2].squeeze(-1)
             # TODO: check if this is correct
             sign = jnp.where(switch_steps <= num_steps, 1.0, -1.0)
             next_value = jnp.where(next_main, -sign * next_value, sign * next_value)
@@ -745,7 +735,7 @@ if __name__ == "__main__":
         single_device_update,
         axis_name="local_devices",
         devices=global_learner_decices,
-        static_broadcasted_argnums=(9,),
+        static_broadcasted_argnums=(8,),
     )
 
     params_queues = []
@@ -786,11 +776,9 @@ if __name__ == "__main__":
             for thread_id in range(args.num_actor_threads):
                 (
                     global_step,
-                    actor_policy_version,
                     update,
                     *sharded_data,
                     avg_params_queue_get_time,
-                    device_thread_id,
                     learn_opponent,
                 ) = rollout_queues[d_idx * args.num_actor_threads + thread_id].get()
                 sharded_data_list.append(sharded_data)
