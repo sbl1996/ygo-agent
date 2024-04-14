@@ -4,6 +4,8 @@ YGO Agent is a project to create a Yu-Gi-Oh! AI using deep learning (LLMs, RL). 
 
 ## News
 
+- April 14, 2024: LSTM has been implemented and well tested. See `scripts/jax/ppo.py` for more details.
+
 - April 7, 2024: We have switched to JAX for training and evalution due to the better performance and flexibility. The scripts are in the `scripts/jax` directory. The documentation is in progress. PyTorch scripts are still available in the `scripts` directory, but they are not maintained.
 
 
@@ -20,10 +22,11 @@ YGO Agent is a project to create a Yu-Gi-Oh! AI using deep learning (LLMs, RL). 
 - [Training](#training)
   - [Single GPU Training](#single-gpu-training)
   - [Distributed Training](#distributed-training)
-- [Training (JAX)](#training-jax)
 - [Plan](#plan)
+  - [Environment](#environment)
   - [Training](#training-1)
   - [Inference](#inference)
+  - [Documentation](#documentation)
 - [Related Projects](#related-projects)
 
 
@@ -170,8 +173,9 @@ The script options are mostly the same as the single GPU training. We only scale
 - Fix information leak in the history actions
 
 ### Training
-- Evaluation with old models during training
-- League training following AlphaStar and ROA-Star
+- League training (AlphaStar, ROA-Star)
+- Nash equilibrium training (OSFP, DeepNash)
+- Centralized critic with full observation
 
 ### Inference
 - MCTS-based planning
