@@ -1252,7 +1252,7 @@ public:
                     "play_mode"_.Bind(std::string("bot")),
                     "verbose"_.Bind(false), "max_options"_.Bind(16),
                     "max_cards"_.Bind(80), "n_history_actions"_.Bind(16),
-                    "record"_.Bind(false), "async_reset"_.Bind(true));
+                    "record"_.Bind(false), "async_reset"_.Bind(true), "greedy_reward"_.Bind(true));
   }
   template <typename Config>
   static decltype(auto) StateSpec(const Config &conf) {
@@ -1353,6 +1353,7 @@ protected:
 
   PlayerId winner_;
   uint8_t win_reason_;
+  bool greedy_reward_;
 
   int lp_[2];
 
@@ -1438,7 +1439,7 @@ public:
         play_modes_(parse_play_modes(spec.config["play_mode"_])),
         verbose_(spec.config["verbose"_]), record_(spec.config["record"_]),
         n_history_actions_(spec.config["n_history_actions"_]), pool_(BS::thread_pool(1)),
-        async_reset_(spec.config["async_reset"_]) {
+        async_reset_(spec.config["async_reset"_]), greedy_reward_(spec.config["greedy_reward"_]) {
     if (record_) {
       if (!verbose_) {
         throw std::runtime_error("record mode must be used with verbose mode and num_envs=1");
@@ -1879,29 +1880,33 @@ public:
     int reason = 0;
     if (done_) {
       float base_reward;
-      if (winner_ == 0) {
-        if (turn_count_ <= 1) {
-          // FTK
-          base_reward = 16.0;
-        } else if (turn_count_ <= 3) {
-          base_reward = 8.0;
-        } else if (turn_count_ <= 5) {
-          base_reward = 4.0;
-        } else if (turn_count_ <= 7) {
-          base_reward = 2.0;
+      if (greedy_reward_) {
+        if (winner_ == 0) {
+          if (turn_count_ <= 1) {
+            // FTK
+            base_reward = 16.0;
+          } else if (turn_count_ <= 3) {
+            base_reward = 8.0;
+          } else if (turn_count_ <= 5) {
+            base_reward = 4.0;
+          } else if (turn_count_ <= 7) {
+            base_reward = 2.0;
+          } else {
+            base_reward = 0.5 + 1.0 / (turn_count_ - 7);
+          }
         } else {
-          base_reward = 0.5 + 1.0 / (turn_count_ - 7);
+          if (turn_count_ <= 1) {
+            base_reward = 8.0;
+          } else if (turn_count_ <= 3) {
+            base_reward = 4.0;
+          } else if (turn_count_ <= 5) {
+            base_reward = 2.0;
+          } else {
+            base_reward = 0.5 + 1.0 / (turn_count_ - 5);
+          }
         }
       } else {
-        if (turn_count_ <= 1) {
-          base_reward = 8.0;
-        } else if (turn_count_ <= 3) {
-          base_reward = 4.0;
-        } else if (turn_count_ <= 5) {
-          base_reward = 2.0;
-        } else {
-          base_reward = 0.5 + 1.0 / (turn_count_ - 5);
-        }
+        base_reward = 1.0;
       }
 
       if (play_mode_ == kSelfPlay) {

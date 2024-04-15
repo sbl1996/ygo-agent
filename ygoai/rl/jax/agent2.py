@@ -336,16 +336,17 @@ class PPOLSTMAgent(nn.Module):
     dtype: jnp.dtype = jnp.float32
     param_dtype: jnp.dtype = jnp.float32
     multi_step: bool = False
+    switch: bool = True
 
     @nn.compact
     def __call__(self, inputs):
         if self.multi_step:
             # (num_steps * batch_size, ...)
-            carry1, carry2, x, done, switch = inputs
-            batch_size = carry1[0].shape[0]
+            rstate1, rstate2, x, done, switch_or_main = inputs
+            batch_size = rstate1[0].shape[0]
             num_steps = done.shape[0] // batch_size
         else:
-            carry, x = inputs
+            rstate, x = inputs
 
         c = self.channels
         encoder = Encoder(
@@ -361,21 +362,31 @@ class PPOLSTMAgent(nn.Module):
         lstm_layer = nn.OptimizedLSTMCell(
             self.lstm_channels, dtype=self.dtype, param_dtype=self.param_dtype, kernel_init=nn.initializers.orthogonal(1.0))
         if self.multi_step:
-            def body_fn(cell, carry, x, done, switch):
-                carry, init_carry = carry
-                carry, y = cell(carry, x)
-                carry = jax.tree.map(lambda x: jnp.where(done[:, None], 0, x), carry)
-                carry = jax.tree.map(lambda x, y: jnp.where(switch[:, None], x, y), init_carry, carry)
-                return (carry, init_carry), y
+            if self.switch:
+                def body_fn(cell, carry, x, done, switch):
+                    rstate, init_rstate2 = carry
+                    rstate, y = cell(rstate, x)
+                    rstate = jax.tree.map(lambda x: jnp.where(done[:, None], 0, x), rstate)
+                    rstate = jax.tree.map(lambda x, y: jnp.where(switch[:, None], x, y), init_rstate2, rstate)
+                    return (rstate, init_rstate2), y
+            else:
+                def body_fn(cell, carry, x, done, main):
+                    rstate1, rstate2 = carry
+                    rstate = jax.tree.map(lambda x1, x2: jnp.where(main[:, None], x1, x2), rstate1, rstate2)
+                    rstate, y = cell(rstate, x)
+                    rstate = jax.tree.map(lambda x: jnp.where(done[:, None], 0, x), rstate)
+                    rstate1 = jax.tree.map(lambda x, y: jnp.where(main[:, None], x, y), rstate, rstate1)
+                    rstate2 = jax.tree.map(lambda x, y: jnp.where(main[:, None], y, x), rstate, rstate2)
+                    return (rstate1, rstate2), y
             scan = nn.scan(
                 body_fn, variable_broadcast='params',
                 split_rngs={'params': False})
-            f_state, done, switch = jax.tree.map(
-                lambda x: jnp.reshape(x, (num_steps, batch_size) + x.shape[1:]), (f_state, done, switch))
-            carry, f_state = scan(lstm_layer, (carry1, carry2), f_state, done, switch)
+            f_state, done, switch_or_main = jax.tree.map(
+                lambda x: jnp.reshape(x, (num_steps, batch_size) + x.shape[1:]), (f_state, done, switch_or_main))
+            rstate, f_state = scan(lstm_layer, (rstate1, rstate2), f_state, done, switch_or_main)
             f_state = f_state.reshape((-1, f_state.shape[-1]))
         else:
-            carry, f_state = lstm_layer(carry, f_state)
+            rstate, f_state = lstm_layer(rstate, f_state)
 
         actor = Actor(
             channels=c, dtype=jnp.float32, param_dtype=self.param_dtype)
@@ -384,4 +395,4 @@ class PPOLSTMAgent(nn.Module):
 
         logits = actor(f_state, f_actions, mask)
         value = critic(f_state)
-        return carry, logits, value, valid
+        return rstate, logits, value, valid

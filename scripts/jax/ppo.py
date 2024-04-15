@@ -26,7 +26,7 @@ from ygoai.utils import init_ygopro
 from ygoai.rl.jax.agent2 import PPOLSTMAgent
 from ygoai.rl.jax.utils import RecordEpisodeStatistics, masked_normalize, categorical_sample
 from ygoai.rl.jax.eval import evaluate, battle
-from ygoai.rl.jax import compute_gae_upgo_2p0s, compute_gae_2p0s
+from ygoai.rl.jax import compute_gae_2p0s, upgo_advantage
 
 
 os.environ["XLA_FLAGS"] = "--xla_cpu_multi_thread_eigen=false intra_op_parallelism_threads=1"
@@ -62,6 +62,8 @@ class Args:
     """the maximum number of options"""
     n_history_actions: int = 32
     """the number of history actions to use"""
+    greedy_reward: bool = True
+    """whether to use greedy reward (faster kill higher reward)"""
 
     total_timesteps: int = 5000000000
     """total timesteps of the experiments"""
@@ -117,7 +119,7 @@ class Args:
     """whether to use `jax.distirbuted`"""
     concurrency: bool = True
     """whether to run the actor and learner concurrently"""
-    bfloat16: bool = True
+    bfloat16: bool = False
     """whether to use bfloat16 for the agent"""
     thread_affinity: bool = False
     """whether to use thread affinity for the environment"""
@@ -161,6 +163,7 @@ def make_env(args, seed, num_envs, num_threads, mode='self', thread_affinity_off
         max_options=args.max_options,
         n_history_actions=args.n_history_actions,
         async_reset=False,
+        greedy_reward=args.greedy_reward,
         play_mode=mode,
     )
     envs.num_envs = num_envs
@@ -596,10 +599,12 @@ if __name__ == "__main__":
             (jax.lax.stop_gradient(new_values), rewards, next_dones, switch),
         )
 
-        compute_gae_fn = compute_gae_upgo_2p0s if args.upgo else compute_gae_2p0s
-        advantages, target_values = compute_gae_fn(
+        advantages, target_values = compute_gae_2p0s(
             next_value, values, rewards, next_dones, switch,
             args.gamma, args.gae_lambda)
+        if args.upgo:
+            advantages = advantages + upgo_advantage(
+                next_value, values, rewards, next_dones, switch, args.gamma)
         advantages, target_values = jax.tree.map(
             lambda x: jnp.reshape(x, (-1,)), (advantages, target_values))
 
