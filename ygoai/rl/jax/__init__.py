@@ -2,340 +2,273 @@ from functools import partial
 
 import jax
 import jax.numpy as jnp
-from typing import NamedTuple
+
+import chex
+import distrax
 
 
-class VTraceOutput(NamedTuple):
-    q_estimate: jnp.ndarray
-    errors: jnp.ndarray
+# class VTraceOutput(NamedTuple):
+#     q_estimate: jnp.ndarray
+#     errors: jnp.ndarray
 
 
-def vtrace(
-    v_tm1,
-    v_t,
-    r_t,
-    discount_t,
-    rho_tm1,
-    lambda_=1.0,
-    c_clip_min: float = 0.001,
-    c_clip_max: float = 1.007,
-    rho_clip_min: float = 0.001,
-    rho_clip_max: float = 1.007,
-    stop_target_gradients: bool = True,
-):
-    """
-
-    Args:
-      v_tm1: values at time t-1.
-      v_t: values at time t.
-      r_t: reward at time t.
-      discount_t: discount at time t.
-      rho_tm1: importance sampling ratios at time t-1.
-      lambda_: mixing parameter; a scalar or a vector for timesteps t.
-      clip_rho_threshold: clip threshold for importance weights.
-      stop_target_gradients: whether or not to apply stop gradient to targets.
-    """
-    # Clip importance sampling ratios.
-    lambda_ = jnp.ones_like(discount_t) * lambda_
-
-    c_tm1 = jnp.clip(rho_tm1, c_clip_min, c_clip_max) * lambda_
-    clipped_rhos_tm1 = jnp.clip(rho_tm1, rho_clip_min, rho_clip_max)
-
-    # Compute the temporal difference errors.
-    td_errors = clipped_rhos_tm1 * (r_t + discount_t * v_t - v_tm1)
-
-    # Work backwards computing the td-errors.
-    def _body(acc, xs):
-        td_error, discount, c = xs
-        acc = td_error + discount * c * acc
-        return acc, acc
-
-    _, errors = jax.lax.scan(
-        _body, 0.0, (td_errors, discount_t, c_tm1), reverse=True)
-
-    # Return errors, maybe disabling gradient flow through bootstrap targets.
-    errors = jax.lax.select(
-        stop_target_gradients,
-        jax.lax.stop_gradient(errors + v_tm1) - v_tm1,
-        errors)
-    targets_tm1 = errors + v_tm1
-    q_bootstrap = jnp.concatenate([
-        lambda_[:-1] * targets_tm1[1:] + (1 - lambda_[:-1]) * v_tm1[1:],
-        v_t[-1:],
-    ], axis=0)
-    q_estimate = r_t + discount_t * q_bootstrap
-    return VTraceOutput(q_estimate=q_estimate, errors=errors)
-
-
-def clipped_surrogate_pg_loss(prob_ratios_t, adv_t, mask, epsilon, use_stop_gradient=True):
-    adv_t = jax.lax.select(use_stop_gradient, jax.lax.stop_gradient(adv_t), adv_t)
-    clipped_ratios_t = jnp.clip(prob_ratios_t, 1. - epsilon, 1. + epsilon)
-    clipped_objective = jnp.fmin(prob_ratios_t * adv_t, clipped_ratios_t * adv_t)
-    return -jnp.mean(clipped_objective * mask)
-
-
-@partial(jax.jit, static_argnums=(5, 6))
-def compute_gae_2p0s(
-    next_value, values, rewards, next_dones, switch, gamma, gae_lambda,
-):
-    def body_fn(carry, inp):
-        boot_value, boot_done, next_value, lastgaelam = carry
-        next_done, cur_value, reward, switch = inp
-
-        next_done = jnp.where(switch, boot_done, next_done)
-        next_value = jnp.where(switch, -boot_value, next_value)
-        lastgaelam = jnp.where(switch, 0, lastgaelam)
-
-        gamma_ = gamma * (1.0 - next_done)
-        delta = reward + gamma_ * next_value - cur_value
-        lastgaelam = delta + gae_lambda * gamma_ * lastgaelam
-        return (boot_value, boot_done, cur_value, lastgaelam), lastgaelam
-
-    next_done = next_dones[-1]
-    lastgaelam = jnp.zeros_like(next_value)
-    carry = next_value, next_done, next_value, lastgaelam
-
-    _, advantages = jax.lax.scan(
-        body_fn, carry, (next_dones, values, rewards, switch), reverse=True
-    )
-    target_values = advantages + values
-    return advantages, target_values
-
-
-@partial(jax.jit, static_argnums=(5,))
-def upgo_advantage(
-    next_value, values, rewards, next_dones, switch, gamma):
-    def body_fn(carry, inp):
-        boot_value, boot_done, next_value, next_q, last_return = carry
-        next_done, cur_value, reward, switch = inp
-
-        next_done = jnp.where(switch, boot_done, next_done)
-        next_value = jnp.where(switch, -boot_value, next_value)
-        next_q = jnp.where(switch, -boot_value * gamma, next_q)
-        last_return = jnp.where(switch, -boot_value, last_return)
-
-        gamma_ = gamma * (1.0 - next_done)
-        last_return = reward + gamma_ * jnp.where(
-            next_q >= next_value, last_return, next_value)
-        next_q = reward + gamma_ * next_value
-        
-        carry = boot_value, boot_done, cur_value, next_q, last_return
-        return carry, last_return
-
-    next_done = next_dones[-1]
-    carry = next_value, next_done, next_value, next_value, next_value
-
-    _, returns = jax.lax.scan(
-        body_fn, carry, (next_dones, values, rewards, switch), reverse=True
-    )
-    return returns - values
-
-
-# def compute_gae_once(carry, inp, gamma, gae_lambda):
-#     v1, v2, next_values1, next_values2, reward1, reward2, xi1, xi2 = carry
-#     rho, cur_values, log_ratio, next_done, r_t, corr_r_t, main = inp
-
-#     v = jnp.where(main, v1, v2)
-#     next_values = jnp.where(main, next_values1, next_values2)
-#     reward = jnp.where(main, reward1, reward2)
-#     xi = jnp.where(main, xi1, xi2)
-#     p_t = c_t = jnp.minimum(1.0, rho * xi)
-#     sig_v = p_t * (r_t + reward * rho + next_values - cur_values)
-
-#     reg_r = jnp.log(p / p_reg)
-
-#     q = r_t + rho * (reward + v)
-#     q = -eta * + cur_values
-#     v = cur_values + sig_v + c_t * (v - next_values)
-
-#     v1 = jnp.where(main, v, v1)
-#     v2 = jnp.where(main, v2, v)
-#     next_values1 = jnp.where(main, cur_values, next_values1)
-#     next_values2 = jnp.where(main, next_values2, cur_values)
-#     reward1 = jnp.where(main, 0, r_t + rho * reward1)
-#     reward2 = jnp.where(main, r_t + rho * reward2, 0)
-#     xi1 = jnp.where(main, 1, rho * xi1)
-#     xi2 = jnp.where(main, rho * xi2, 1)
-
-#     learn1 = learn
-#     learn2 = ~learn
-#     factor = jnp.where(learn1, jnp.ones_like(reward), -jnp.ones_like(reward))
-#     reward1 = jnp.where(next_done, reward * factor, jnp.where(learn1 & done_used1, 0, reward1))
-#     reward2 = jnp.where(next_done, reward * -factor, jnp.where(learn2 & done_used2, 0, reward2))
-#     real_done1 = next_done | ~done_used1
-#     nextvalues1 = jnp.where(real_done1, 0, nextvalues1)
-#     lastgaelam1 = jnp.where(real_done1, 0, lastgaelam1)
-#     real_done2 = next_done | ~done_used2
-#     nextvalues2 = jnp.where(real_done2, 0, nextvalues2)
-#     lastgaelam2 = jnp.where(real_done2, 0, lastgaelam2)
-#     done_used1 = jnp.where(
-#         next_done, learn1, jnp.where(learn1 & ~done_used1, True, done_used1))
-#     done_used2 = jnp.where(
-#         next_done, learn2, jnp.where(learn2 & ~done_used2, True, done_used2))
-
-#     delta1 = reward1 + gamma * nextvalues1 - curvalues
-#     delta2 = reward2 + gamma * nextvalues2 - curvalues
-#     lastgaelam1_ = delta1 + gamma * gae_lambda * lastgaelam1
-#     lastgaelam2_ = delta2 + gamma * gae_lambda * lastgaelam2
-#     advantages = jnp.where(learn1, lastgaelam1_, lastgaelam2_)
-#     nextvalues1 = jnp.where(learn1, curvalues, nextvalues1)
-#     nextvalues2 = jnp.where(learn2, curvalues, nextvalues2)
-#     lastgaelam1 = jnp.where(learn1, lastgaelam1_, lastgaelam1)
-#     lastgaelam2 = jnp.where(learn2, lastgaelam2_, lastgaelam2)
-#     carry = nextvalues1, nextvalues2, done_used1, done_used2, reward1, reward2, lastgaelam1, lastgaelam2
-#     return carry, advantages
-
-
-# @partial(jax.jit, static_argnums=(6, 7))
-# def vtrace_rnad(
-#     next_value, next_done, values, rewards, dones, learns,
-#     gamma, gae_lambda,
+# def vtrace(
+#     v_tm1,
+#     v_t,
+#     r_t,
+#     discount_t,
+#     rho_tm1,
+#     lambda_=1.0,
+#     c_clip_min: float = 0.001,
+#     c_clip_max: float = 1.007,
+#     rho_clip_min: float = 0.001,
+#     rho_clip_max: float = 1.007,
+#     stop_target_gradients: bool = True,
 # ):
-#     next_value1 = next_value
-#     next_value2 = -next_value1
-#     done_used1 = jnp.ones_like(next_done)
-#     done_used2 = jnp.ones_like(next_done)
-#     reward1 = jnp.zeros_like(next_value)
-#     reward2 = jnp.zeros_like(next_value)
-#     lastgaelam1 = jnp.zeros_like(next_value)
-#     lastgaelam2 = jnp.zeros_like(next_value)
-#     carry = next_value1, next_value2, done_used1, done_used2, reward1, reward2, lastgaelam1, lastgaelam2
+#     """
 
-#     dones = jnp.concatenate([dones, next_done[None, :]], axis=0)
-#     _, advantages = jax.lax.scan(
-#         partial(compute_gae_once, gamma=gamma, gae_lambda=gae_lambda),
-#         carry, (dones[1:], values, rewards, learns), reverse=True
-#     )
-#     target_values = advantages + values
-#     return advantages, target_values
+#     Args:
+#       v_tm1: values at time t-1.
+#       v_t: values at time t.
+#       r_t: reward at time t.
+#       discount_t: discount at time t.
+#       rho_tm1: importance sampling ratios at time t-1.
+#       lambda_: mixing parameter; a scalar or a vector for timesteps t.
+#       clip_rho_threshold: clip threshold for importance weights.
+#       stop_target_gradients: whether or not to apply stop gradient to targets.
+#     """
+#     # Clip importance sampling ratios.
+#     lambda_ = jnp.ones_like(discount_t) * lambda_
 
+#     c_tm1 = jnp.clip(rho_tm1, c_clip_min, c_clip_max) * lambda_
+#     clipped_rhos_tm1 = jnp.clip(rho_tm1, rho_clip_min, rho_clip_max)
 
-def compute_gae_once(carry, inp, gamma, gae_lambda):
-    nextvalues1, nextvalues2, done_used1, done_used2, reward1, reward2, lastgaelam1, lastgaelam2 = carry
-    next_done, curvalues, reward, learn = inp
-    learn1 = learn
-    learn2 = ~learn
-    factor = jnp.where(learn1, jnp.ones_like(reward), -jnp.ones_like(reward))
-    reward1 = jnp.where(next_done, reward * factor, jnp.where(learn1 & done_used1, 0, reward1))
-    reward2 = jnp.where(next_done, reward * -factor, jnp.where(learn2 & done_used2, 0, reward2))
-    real_done1 = next_done | ~done_used1
-    nextvalues1 = jnp.where(real_done1, 0, nextvalues1)
-    lastgaelam1 = jnp.where(real_done1, 0, lastgaelam1)
-    real_done2 = next_done | ~done_used2
-    nextvalues2 = jnp.where(real_done2, 0, nextvalues2)
-    lastgaelam2 = jnp.where(real_done2, 0, lastgaelam2)
-    done_used1 = jnp.where(
-        next_done, learn1, jnp.where(learn1 & ~done_used1, True, done_used1))
-    done_used2 = jnp.where(
-        next_done, learn2, jnp.where(learn2 & ~done_used2, True, done_used2))
+#     # Compute the temporal difference errors.
+#     td_errors = clipped_rhos_tm1 * (r_t + discount_t * v_t - v_tm1)
 
-    delta1 = reward1 + gamma * nextvalues1 - curvalues
-    delta2 = reward2 + gamma * nextvalues2 - curvalues
-    lastgaelam1_ = delta1 + gamma * gae_lambda * lastgaelam1
-    lastgaelam2_ = delta2 + gamma * gae_lambda * lastgaelam2
-    advantages = jnp.where(learn1, lastgaelam1_, lastgaelam2_)
-    nextvalues1 = jnp.where(learn1, curvalues, nextvalues1)
-    nextvalues2 = jnp.where(learn2, curvalues, nextvalues2)
-    lastgaelam1 = jnp.where(learn1, lastgaelam1_, lastgaelam1)
-    lastgaelam2 = jnp.where(learn2, lastgaelam2_, lastgaelam2)
-    carry = nextvalues1, nextvalues2, done_used1, done_used2, reward1, reward2, lastgaelam1, lastgaelam2
-    return carry, advantages
+#     # Work backwards computing the td-errors.
+#     def _body(acc, xs):
+#         td_error, discount, c = xs
+#         acc = td_error + discount * c * acc
+#         return acc, acc
+
+#     _, errors = jax.lax.scan(
+#         _body, 0.0, (td_errors, discount_t, c_tm1), reverse=True)
+
+#     # Return errors, maybe disabling gradient flow through bootstrap targets.
+#     errors = jax.lax.select(
+#         stop_target_gradients,
+#         jax.lax.stop_gradient(errors + v_tm1) - v_tm1,
+#         errors)
+#     targets_tm1 = errors + v_tm1
+#     q_bootstrap = jnp.concatenate([
+#         lambda_[:-1] * targets_tm1[1:] + (1 - lambda_[:-1]) * v_tm1[1:],
+#         v_t[-1:],
+#     ], axis=0)
+#     q_estimate = r_t + discount_t * q_bootstrap
+#     return VTraceOutput(q_estimate=q_estimate, errors=errors)
 
 
-@partial(jax.jit, static_argnums=(7, 8))
-def compute_gae(
-    next_value, next_done, next_learn,
-    values, rewards, dones, learns,
-    gamma, gae_lambda,
+def entropy_loss(logits):
+    return distrax.Softmax(logits=logits).entropy()
+
+
+def mse_loss(y_true, y_pred):
+    return 0.5 * ((y_true - y_pred) ** 2)
+
+
+def policy_gradient_loss(logits, actions, advantages):
+    chex.assert_type([logits, actions, advantages], [float, int, float])
+  
+    advs = jax.lax.stop_gradient(advantages)
+    log_probs = distrax.Softmax(logits=logits).log_prob(actions)
+    pg_loss = -log_probs * advs
+    return pg_loss
+
+
+def clipped_surrogate_pg_loss(ratios, advantages, clip_coef, dual_clip_coef=None):
+    # dual clip from JueWu (Mastering Complex Control in MOBA Games with Deep Reinforcement Learning)
+    advs = jax.lax.stop_gradient(advantages)
+    clipped_ratios = jnp.clip(ratios, 1 - clip_coef, 1 + clip_coef)
+    clipped_obj = jnp.fmin(ratios * advs, clipped_ratios * advs)
+    if dual_clip_coef is not None:
+        clipped_obj = jnp.where(
+            advs >= 0, clipped_obj,
+            jnp.fmax(clipped_obj, dual_clip_coef * advs)
+        )
+    pg_loss = -clipped_obj
+    return pg_loss
+
+
+def vtrace_loop(carry, inp, gamma, rho_min, rho_max, c_min, c_max):
+    v1, v2, next_values1, next_values2, reward1, reward2, xi1, xi2, \
+        last_return1, last_return2, next_q1, next_q2 = carry
+    ratio, cur_values, next_done, r_t, main = inp
+
+    v1 = jnp.where(next_done, 0, v1)
+    v2 = jnp.where(next_done, 0, v2)
+    next_values1 = jnp.where(next_done, 0, next_values1)
+    next_values2 = jnp.where(next_done, 0, next_values2)
+    reward1 = jnp.where(next_done, 0, reward1)
+    reward2 = jnp.where(next_done, 0, reward2)
+    xi1 = jnp.where(next_done, 1, xi1)
+    xi2 = jnp.where(next_done, 1, xi2)
+
+    discount = gamma * (1.0 - next_done)
+    v = jnp.where(main, v1, v2)
+    next_values = jnp.where(main, next_values1, next_values2)
+    reward = jnp.where(main, reward1, reward2)
+    xi = jnp.where(main, xi1, xi2)
+
+    q_t = r_t + ratio * reward + discount * v
+
+    rho_t = jnp.clip(ratio * xi, rho_min, rho_max)
+    c_t = jnp.clip(ratio * xi, c_min, c_max)
+    sig_v = rho_t * (r_t + ratio * reward + discount * next_values - cur_values)
+    v = cur_values + sig_v + c_t * discount * (v - next_values)
+
+    # UPGO advantage (not corrected by importance sampling, unlike V-trace)
+    return_t = jnp.where(main, last_return1, last_return2)
+    next_q = jnp.where(main, next_q1, next_q2)
+    factor = jnp.where(main, jnp.ones_like(r_t), -jnp.ones_like(r_t))
+    return_t = r_t + discount * jnp.where(
+        next_q >= next_values, return_t, next_values)
+    last_return1 = jnp.where(
+        next_done, r_t * factor, jnp.where(main, return_t, last_return1))
+    last_return2 = jnp.where(
+        next_done, r_t * -factor, jnp.where(main, last_return2, return_t))
+    next_q = r_t + discount * next_values
+    next_q1 = jnp.where(
+        next_done, r_t * factor, jnp.where(main, next_q, next_q1))
+    next_q2 = jnp.where(
+        next_done, r_t * -factor, jnp.where(main, next_q2, next_q))
+
+    v1 = jnp.where(main, v, v1)
+    v2 = jnp.where(main, v2, v)
+    next_values1 = jnp.where(main, cur_values, next_values1)
+    next_values2 = jnp.where(main, next_values2, cur_values)
+    reward1 = jnp.where(main, 0, -r_t + ratio * reward1)
+    reward2 = jnp.where(main, -r_t + ratio * reward2, 0)
+    xi1 = jnp.where(main, 1, ratio * xi1)
+    xi2 = jnp.where(main, ratio * xi2, 1)
+
+    carry = v1, v2, next_values1, next_values2, reward1, reward2, xi1, xi2, \
+        last_return1, last_return2, next_q1, next_q2
+    return carry, (v, q_t, return_t)
+
+
+def vtrace_2p0s(
+    next_value, ratios, values, rewards, next_dones, mains,
+    gamma, rho_min=0.001, rho_max=1.0, c_min=0.001, c_max=1.0, upgo=False,
 ):
-    next_value1 = jnp.where(next_learn, next_value, -next_value)
+    next_value1 = next_value
     next_value2 = -next_value1
-    done_used1 = jnp.ones_like(next_done)
-    done_used2 = jnp.ones_like(next_done)
-    reward1 = jnp.zeros_like(next_value)
-    reward2 = jnp.zeros_like(next_value)
-    lastgaelam1 = jnp.zeros_like(next_value)
-    lastgaelam2 = jnp.zeros_like(next_value)
-    carry = next_value1, next_value2, done_used1, done_used2, reward1, reward2, lastgaelam1, lastgaelam2
+    v1 = return1 = next_q1 = next_value1
+    v2 = return2 = next_q2 = next_value2
+    reward1 = reward2 = jnp.zeros_like(next_value)
+    xi1 = xi2 = jnp.ones_like(next_value)
+    carry = v1, v2, next_value1, next_value2, reward1, reward2, xi1, xi2, \
+        return1, return2, next_q1, next_q2
 
-    dones = jnp.concatenate([dones, next_done[None, :]], axis=0)
-    _, advantages = jax.lax.scan(
-        partial(compute_gae_once, gamma=gamma, gae_lambda=gae_lambda),
-        carry, (dones[1:], values, rewards, learns), reverse=True
+    _, (targets, q_estimate, return_t) = jax.lax.scan(
+        partial(vtrace_loop, gamma=gamma, rho_min=rho_min, rho_max=rho_max, c_min=c_min, c_max=c_max),
+        carry, (ratios, values, next_dones, rewards, mains), reverse=True
     )
-    target_values = advantages + values
-    return advantages, target_values
+    advantages = q_estimate - values
+    if upgo:
+        advantages += return_t - values
+    targets = jax.lax.stop_gradient(targets)
+    return targets, advantages
 
 
-def compute_gae_once_upgo(carry, inp, gamma, gae_lambda):
-    next_value1, next_value2, next_q1, next_q2, last_return1, last_return2, \
-        done_used1, done_used2, reward1, reward2, lastgaelam1, lastgaelam2 = carry
-    next_done, curvalues, reward, learn = inp
-    learn1 = learn
-    learn2 = ~learn
-    factor = jnp.where(learn1, jnp.ones_like(reward), -jnp.ones_like(reward))
-    reward1 = jnp.where(next_done, reward * factor, jnp.where(learn1 & done_used1, 0, reward1))
-    reward2 = jnp.where(next_done, reward * -factor, jnp.where(learn2 & done_used2, 0, reward2))
+def truncated_gae_upgo_loop(carry, inp, gamma, gae_lambda):
+    lastgaelam1, lastgaelam2, next_value1, next_value2, reward1, reward2, \
+        done_used1, done_used2, last_return1, last_return2, next_q1, next_q2 = carry
+    cur_value, next_done, reward, main = inp
+    main1 = main
+    main2 = ~main
+    factor = jnp.where(main1, jnp.ones_like(reward), -jnp.ones_like(reward))
+    reward1 = jnp.where(next_done, reward * factor, jnp.where(main1 & done_used1, 0, reward1))
+    reward2 = jnp.where(next_done, reward * -factor, jnp.where(main2 & done_used2, 0, reward2))
     real_done1 = next_done | ~done_used1
     next_value1 = jnp.where(real_done1, 0, next_value1)
-    last_return1 = jnp.where(real_done1, 0, last_return1)
     lastgaelam1 = jnp.where(real_done1, 0, lastgaelam1)
     real_done2 = next_done | ~done_used2
     next_value2 = jnp.where(real_done2, 0, next_value2)
-    last_return2 = jnp.where(real_done2, 0, last_return2)
     lastgaelam2 = jnp.where(real_done2, 0, lastgaelam2)
     done_used1 = jnp.where(
-        next_done, learn1, jnp.where(learn1 & ~done_used1, True, done_used1))
+        next_done, main1, jnp.where(main1 & ~done_used1, True, done_used1))
     done_used2 = jnp.where(
-        next_done, learn2, jnp.where(learn2 & ~done_used2, True, done_used2))
+        next_done, main2, jnp.where(main2 & ~done_used2, True, done_used2))
 
+    # UPGO advantage
+    last_return1 = jnp.where(real_done1, 0, last_return1)
+    last_return2 = jnp.where(real_done2, 0, last_return2)
     last_return1_ = reward1 + gamma * jnp.where(
         next_q1 >= next_value1, last_return1, next_value1)
     last_return2_ = reward2 + gamma * jnp.where(
         next_q2 >= next_value2, last_return2, next_value2)
     next_q1_ = reward1 + gamma * next_value1
     next_q2_ = reward2 + gamma * next_value2
-    delta1 = next_q1_ - curvalues
-    delta2 = next_q2_ - curvalues
+    next_q1 = jnp.where(main1, next_q1_, next_q1)
+    next_q2 = jnp.where(main2, next_q2_, next_q1)
+    last_return1 = jnp.where(main1, last_return1_, last_return1)
+    last_return2 = jnp.where(main2, last_return2_, last_return2)
+    returns = jnp.where(main1, last_return1_, last_return2_)
+
+    delta1 = next_q1_ - cur_value
+    delta2 = next_q2_ - cur_value
     lastgaelam1_ = delta1 + gamma * gae_lambda * lastgaelam1
     lastgaelam2_ = delta2 + gamma * gae_lambda * lastgaelam2
-    returns = jnp.where(learn1, last_return1_, last_return2_)
-    advantages = jnp.where(learn1, lastgaelam1_, lastgaelam2_)
-    next_value1 = jnp.where(learn1, curvalues, next_value1)
-    next_value2 = jnp.where(learn2, curvalues, next_value2)
-    lastgaelam1 = jnp.where(learn1, lastgaelam1_, lastgaelam1)
-    lastgaelam2 = jnp.where(learn2, lastgaelam2_, lastgaelam2)
-    next_q1 = jnp.where(learn1, next_q1_, next_q1)
-    next_q2 = jnp.where(learn2, next_q2_, next_q1)
-    last_return1 = jnp.where(learn1, last_return1_, last_return1)
-    last_return2 = jnp.where(learn2, last_return2_, last_return2)
-    carry = next_value1, next_value2, next_q1, next_q2, last_return1, last_return2, \
-        done_used1, done_used2, reward1, reward2, lastgaelam1, lastgaelam2
+    advantages = jnp.where(main1, lastgaelam1_, lastgaelam2_)
+    next_value1 = jnp.where(main1, cur_value, next_value1)
+    next_value2 = jnp.where(main2, cur_value, next_value2)
+    lastgaelam1 = jnp.where(main1, lastgaelam1_, lastgaelam1)
+    lastgaelam2 = jnp.where(main2, lastgaelam2_, lastgaelam2)
+
+    carry = lastgaelam1, lastgaelam2, next_value1, next_value2, reward1, reward2, \
+        done_used1, done_used2, last_return1, last_return2, next_q1, next_q2
     return carry, (advantages, returns)
 
 
-@partial(jax.jit, static_argnums=(7, 8))
-def compute_gae_upgo(
-    next_value, next_done, next_learn,
-    values, rewards, dones, learns,
-    gamma, gae_lambda,
+def truncated_gae_2p0s(
+    next_value, values, rewards, next_dones, mains, gamma, gae_lambda, upgo,
 ):
-    next_value1 = jnp.where(next_learn, next_value, -next_value)
+    next_value1 = next_value
     next_value2 = -next_value1
     last_return1 = next_q1 = next_value1
     last_return2 = next_q2 = next_value2
-    done_used1 = jnp.ones_like(next_done)
-    done_used2 = jnp.ones_like(next_done)
-    reward1 = jnp.zeros_like(next_value)
-    reward2 = jnp.zeros_like(next_value)
-    lastgaelam1 = jnp.zeros_like(next_value)
-    lastgaelam2 = jnp.zeros_like(next_value)
-    carry = next_value1, next_value2, next_q1, next_q2, last_return1, last_return2, \
-        done_used1, done_used2, reward1, reward2, lastgaelam1, lastgaelam2
+    done_used1 = jnp.ones_like(next_dones[-1])
+    done_used2 = jnp.ones_like(next_dones[-1])
+    reward1 = reward2 = jnp.zeros_like(next_value)
+    lastgaelam1 = lastgaelam2 = jnp.zeros_like(next_value)
+    carry = lastgaelam1, lastgaelam2, next_value1, next_value2, reward1, reward2, \
+        done_used1, done_used2, last_return1, last_return2, next_q1, next_q2
 
-    dones = jnp.concatenate([dones, next_done[None, :]], axis=0)
     _, (advantages, returns) = jax.lax.scan(
-        partial(compute_gae_once_upgo, gamma=gamma, gae_lambda=gae_lambda),
-        carry, (dones[1:], values, rewards, learns), reverse=True
+        partial(truncated_gae_upgo_loop, gamma=gamma, gae_lambda=gae_lambda),
+        carry, (values, next_dones, rewards, mains), reverse=True
     )
-    return returns - values, advantages + values
+    if upgo:
+        advantages += returns - values
+    targets = values + advantages
+    targets = jax.lax.stop_gradient(targets)
+    return targets, advantages
+
+
+def simple_policy_loss(ratios, logits, new_logits, advantages, kld_max, eps=1e-12):
+    advs = jax.lax.stop_gradient(advantages)
+    probs = jax.nn.softmax(logits)
+    new_probs = jax.nn.softmax(new_logits)
+    kld = jnp.sum(
+        probs * jnp.log((probs + eps) / (new_probs + eps)), axis=-1)
+    kld_clip = jnp.clip(kld, 0, kld_max)
+    d_ratio = kld_clip / (kld + eps)
+
+    # e == 1 and t == 1
+    d_ratio = jnp.where(kld < 1e-6, 1.0, d_ratio)
+
+    sign_a = jnp.sign(advs)
+    result = (d_ratio + sign_a - 1) * sign_a
+    pg_loss = -advs * ratios * result
+    return pg_loss

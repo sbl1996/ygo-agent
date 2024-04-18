@@ -4,6 +4,7 @@ import os
 import random
 from typing import Optional, Literal
 from dataclasses import dataclass
+from tqdm import tqdm
 
 import ygoenv
 import numpy as np
@@ -220,6 +221,9 @@ if __name__ == "__main__":
     ])
     rstate1 = rstate2 = init_rnn_state(num_envs, args.rnn_channels)
 
+    if not args.verbose:
+        pbar = tqdm(total=args.num_episodes)
+
     model_time = env_time = 0
     while True:
         if start_step == 0 and len(episode_lengths) > int(args.num_episodes * 0.1):
@@ -255,7 +259,11 @@ if __name__ == "__main__":
                 episode_rewards.append(episode_reward)
                 win_rates.append(win)
                 win_reasons.append(1 if win_reason == 1 else 0)
-                sys.stderr.write(f"Episode {len(episode_lengths)}: length={episode_length}, reward={episode_reward}, win={win}, win_reason={win_reason}\n")
+                if args.verbose:
+                    print(f"Episode {len(episode_lengths)}: length={episode_length}, reward={episode_reward}, win={win}, win_reason={win_reason}\n")
+                else:
+                    pbar.set_postfix(len=np.mean(episode_lengths), reward=np.mean(episode_rewards), win_rate=np.mean(win_rates))
+                    pbar.update(1)
 
                 # Only when num_envs=1, we switch the player here
                 if args.verbose:
@@ -264,6 +272,8 @@ if __name__ == "__main__":
         if len(episode_lengths) >= args.num_episodes:
             break
 
+    if not args.verbose:
+        pbar.close()
     print(f"len={np.mean(episode_lengths)}, reward={np.mean(episode_rewards)}, win_rate={np.mean(win_rates)}, win_reason={np.mean(win_reasons)}")
 
     total_time = time.time() - start

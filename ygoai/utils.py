@@ -1,3 +1,5 @@
+import pickle
+import numpy as np
 from pathlib import Path
 
 
@@ -44,3 +46,14 @@ def init_ygopro(env_id, lang, deck, code_list_file, preload_tokens=False):
 		from ygoenv.edopro import init_module
 	init_module(str(db_path), code_list_file, decks)
 	return deck_name
+
+
+def load_embeddings(embedding_file, code_list_file):
+    with open(embedding_file, "rb") as f:
+        embeddings = pickle.load(f)
+    with open(code_list_file, "r") as f:
+        code_list = f.readlines()
+        code_list = [int(code.strip()) for code in code_list]
+    assert len(embeddings) == len(code_list), f"len(embeddings)={len(embeddings)}, len(code_list)={len(code_list)}"
+    embeddings = np.array([embeddings[code] for code in code_list], dtype=np.float32)
+    return embeddings

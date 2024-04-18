@@ -150,6 +150,7 @@ class Encoder(nn.Module):
     embedding_shape: Optional[Union[int, Tuple[int, int]]] = None
     dtype: Optional[jnp.dtype] = None
     param_dtype: jnp.dtype = jnp.float32
+    freeze_id: bool = False
 
     @nn.compact
     def __call__(self, x):
@@ -168,6 +169,8 @@ class Encoder(nn.Module):
         fc_layer = partial(nn.Dense, use_bias=False, param_dtype=self.param_dtype)
 
         id_embed = embed(n_embed, embed_dim)
+        if self.freeze_id:
+            id_embed = lambda x: jax.lax.stop_gradient(id_embed(x))
         action_encoder = ActionEncoder(
             channels=c, dtype=jnp.float32, param_dtype=self.param_dtype)
 
@@ -337,6 +340,7 @@ class PPOLSTMAgent(nn.Module):
     param_dtype: jnp.dtype = jnp.float32
     multi_step: bool = False
     switch: bool = True
+    freeze_id: bool = False
 
     @nn.compact
     def __call__(self, inputs):
@@ -355,6 +359,7 @@ class PPOLSTMAgent(nn.Module):
             embedding_shape=self.embedding_shape,
             dtype=self.dtype,
             param_dtype=self.param_dtype,
+            freeze_id=self.freeze_id,
         )
 
         f_actions, f_state, mask, valid = encoder(x)

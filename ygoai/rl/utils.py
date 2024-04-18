@@ -58,13 +58,3 @@ def masked_normalize(x, valid, eps=1e-8):
 def to_tensor(x, device, dtype=None):
     return optree.tree_map(lambda x: torch.from_numpy(x).to(device=device, dtype=dtype, non_blocking=True), x)
 
-
-def load_embeddings(embedding_file, code_list_file):
-    with open(embedding_file, "rb") as f:
-        embeddings = pickle.load(f)
-    with open(code_list_file, "r") as f:
-        code_list = f.readlines()
-        code_list = [int(code.strip()) for code in code_list]
-    assert len(embeddings) == len(code_list), f"len(embeddings)={len(embeddings)}, len(code_list)={len(code_list)}"
-    embeddings = np.array([embeddings[code] for code in code_list], dtype=np.float32)
-    return embeddings
