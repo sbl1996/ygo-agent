@@ -9,7 +9,7 @@ DESCRIPTION = "A Yu-Gi-Oh! AI."
 URL = 'https://github.com/sbl1996/ygo-agent'
 EMAIL = 'sbl1996@gmail.com'
 AUTHOR = 'Hastur'
-REQUIRES_PYTHON = '>=3.8.0'
+REQUIRES_PYTHON = '>=3.10.0'
 VERSION = None
 
 REQUIRED = [
