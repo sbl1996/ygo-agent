@@ -119,7 +119,7 @@ python -u battle.py --deck ../assets/deck --checkpoint1 checkpoints/350c29a_7565
 We can set `--record` to generate `.yrp` replay files to the `replay` directory. The `yrp` files can be replayed in YGOPro compatible clients (YGOPro, YGOPro2, KoishiPro, MDPro). Change `--seed` to generate different games.
 
 ```bash
-python -u battle.py --deck ../assets/deck --checkpoint1 checkpoints/350c29a_7565_6700M.flax_model --checkpoint2 checkpoints/350c29a_1166_6200M.flax_model --num-episodes 16 --record --seed 0
+python -u battle.py --deck ../assets/deck --xla_device cpu --checkpoint1 checkpoints/350c29a_7565_6700M.flax_model --checkpoint2 checkpoints/350c29a_1166_6200M.flax_model --num-episodes 16 --record --seed 0
 ```
 
 
