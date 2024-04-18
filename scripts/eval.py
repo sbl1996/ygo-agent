@@ -8,8 +8,6 @@ from dataclasses import dataclass
 import ygoenv
 import numpy as np
 
-import optree
-
 import tyro
 
 from ygoai.utils import init_ygopro
@@ -63,6 +61,8 @@ class Args:
     """the number of layers for the agent"""
     num_channels: int = 128
     """the number of channels for the agent"""
+    rnn_channels: Optional[int] = 512
+    """the number of rnn channels for the agent"""
     checkpoint: Optional[str] = None
     """the checkpoint to load, `pt` or `flax_model` file"""
 
@@ -70,24 +70,24 @@ class Args:
     xla_device: Optional[str] = None
     """the XLA device to use, defaults to `None`"""
 
-    # PyTorch specific
-    torch_deterministic: bool = True
-    """if toggled, `torch.backends.cudnn.deterministic=False`"""
-    cuda: bool = True
-    """if toggled, cuda will be enabled by default"""
-    compile: bool = False
-    """if toggled, the model will be compiled"""
-    optimize: bool = True
-    """if toggled, the model will be optimized"""
-    convert: bool = False
-    """if toggled, the model will be converted to a jit model and the program will exit"""
-    torch_threads: Optional[int] = None
-    """the number of threads to use for torch, defaults to ($OMP_NUM_THREADS or 2) * world_size"""
-
     env_threads: Optional[int] = 16
     """the number of threads to use for envpool, defaults to `num_envs`"""
 
-    framework: Optional[Literal["torch", "jax"]] = None
+
+def create_agent(args):
+    return PPOLSTMAgent(
+        channels=args.num_channels,
+        num_layers=args.num_layers,
+        lstm_channels=args.rnn_channels,
+        embedding_shape=args.num_embeddings,
+    )
+
+
+def init_rnn_state(num_envs, rnn_channels):
+    return (
+        np.zeros((num_envs, rnn_channels)),
+        np.zeros((num_envs, rnn_channels)),
+    )
 
 
 if __name__ == "__main__":
@@ -113,20 +113,8 @@ if __name__ == "__main__":
     random.seed(seed)
     np.random.seed(seed)
 
-    if args.checkpoint and args.framework is None:
-        args.framework = "jax" if "flax_model" in args.checkpoint else "torch"
-
-    if args.framework == "torch":
-        import torch
-        torch.manual_seed(args.seed)
-        torch.backends.cudnn.deterministic = args.torch_deterministic
-
-        args.torch_threads = args.torch_threads or int(os.getenv("OMP_NUM_THREADS", "4"))
-        torch.set_num_threads(args.torch_threads)
-        torch.set_float32_matmul_precision('high')
-    else:
-        if args.xla_device is not None:
-            os.environ.setdefault("JAX_PLATFORMS", args.xla_device)
+    if args.xla_device is not None:
+        os.environ.setdefault("JAX_PLATFORMS", args.xla_device)
 
     num_envs = args.num_envs
 
@@ -150,102 +138,46 @@ if __name__ == "__main__":
     envs.num_envs = num_envs
     envs = RecordEpisodeStatistics(envs)
 
-    if args.framework == 'torch':
-        from ygoai.rl.agent import PPOAgent as Agent
-        from ygoai.rl.buffer import create_obs
-
-        device = torch.device("cuda" if torch.cuda.is_available() and args.cuda else "cpu")
-
-        if args.checkpoint.endswith(".ptj"):
-            agent = torch.jit.load(args.checkpoint)
-        else:
-            # count lines of code_list
-            embedding_shape = args.num_embeddings
-            if embedding_shape is None:
-                with open(args.code_list_file, "r") as f:
-                    code_list = f.readlines()
-                    embedding_shape = len(code_list)
-            L = args.num_layers
-            agent = Agent(args.num_channels, L, L, embedding_shape).to(device)
-            state_dict = torch.load(args.checkpoint, map_location=device)
-            if not args.compile:
-                prefix = "_orig_mod."
-                state_dict = {k[len(prefix):] if k.startswith(prefix) else k: v for k, v in state_dict.items()}
-            print(agent.load_state_dict(state_dict))
-
-            if args.compile:
-                if args.convert:
-                    # Don't support dynamic shapes and very slow inference
-                    raise NotImplementedError
-                    # obs = create_obs(envs.observation_space, (num_envs,), device=device)
-                    # dynamic_shapes = {"x": {}}
-                    # # batch_dim = torch.export.Dim("batch", min=1, max=64)
-                    # batch_dim = None
-                    # for k, v in obs.items():
-                    #     dynamic_shapes["x"][k] = {0: batch_dim}
-                    # program = torch.export.export(
-                    #     agent, (obs,),
-                    #     dynamic_shapes=dynamic_shapes,
-                    # )
-                    # torch.export.save(program, args.checkpoint + "2")
-                    # exit(0)
-                agent = torch.compile(agent, mode='reduce-overhead')
-            elif args.optimize:
-                obs = create_obs(envs.observation_space, (num_envs,), device=device)
-                def optimize_for_inference(agent):
-                    with torch.no_grad():
-                        traced_model = torch.jit.trace(agent, (obs,), check_tolerance=False, check_trace=False)
-                        return torch.jit.optimize_for_inference(traced_model)
-                agent = optimize_for_inference(agent)
-                if args.convert:
-                    torch.jit.save(agent, args.checkpoint + "j")
-                    print(f"Optimized model saved to {args.checkpoint}j")
-                    exit(0)
-
-        def predict_fn(obs):
-            obs = optree.tree_map(lambda x: torch.from_numpy(x).to(device=device), obs)
-            with torch.no_grad():
-                logits = agent(obs)[0]
-            probs = torch.softmax(logits, dim=-1)
-            probs = probs.cpu().numpy()
-            return probs
-    else:
+    if args.checkpoint:
         import jax
         import jax.numpy as jnp
         import flax
-        from ygoai.rl.jax.agent2 import PPOAgent
-        def create_agent(args):
-            return PPOAgent(
-                channels=128,
-                num_layers=2,
-                embedding_shape=args.num_embeddings,
-            )
-        agent = create_agent(args)
+        from ygoai.rl.jax.agent2 import PPOLSTMAgent
+        from jax.experimental.compilation_cache import compilation_cache as cc
+        cc.set_cache_dir(os.path.expanduser("~/.cache/jax"))
 
+        agent = create_agent(args)
         key = jax.random.PRNGKey(args.seed)
         key, agent_key = jax.random.split(key, 2)
         sample_obs = jax.tree.map(lambda x: jnp.array([x]), obs_space.sample())
-        params = agent.init(agent_key, sample_obs)
+
+        rstate = init_rnn_state(1, args.rnn_channels)
+        params = jax.jit(agent.init)(agent_key, (rstate, sample_obs))
+
         with open(args.checkpoint, "rb") as f:
             params = flax.serialization.from_bytes(params, f.read())
 
-        @jax.jit
-        def get_probs(
-            params: flax.core.FrozenDict,
-            next_obs,
-        ):
-            logits = create_agent(args).apply(params, next_obs)[0]
-            return jax.nn.softmax(logits, axis=-1)
+        params = jax.device_put(params)
 
-        def predict_fn(obs):
-            probs = get_probs(params, obs)
-            return np.array(probs)
+        @jax.jit
+        def get_probs(params, rstate, obs, done):
+            agent = create_agent(args)
+            next_rstate, logits = agent.apply(params, (rstate, obs))[:2]
+            probs = jax.nn.softmax(logits, axis=-1)
+            next_rstate = jax.tree.map(
+                lambda x: jnp.where(done[:, None], 0, x), next_rstate)
+            return next_rstate, probs
+
+        def predict_fn(rstate, obs, done):
+            rstate, probs = get_probs(params, rstate, obs, done)
+            return rstate, np.array(probs)
 
         print(f"loaded checkpoint from {args.checkpoint}")
 
 
     obs, infos = envs.reset()
     next_to_play = infos['to_play']
+    dones = np.zeros(num_envs, dtype=np.bool_)
 
     episode_rewards = []
     episode_lengths = []
@@ -263,9 +195,9 @@ if __name__ == "__main__":
             start_step = step
             model_time = env_time = 0
 
-        if args.framework:
+        if args.checkpoint:
             _start = time.time()
-            probs = predict_fn(obs)
+            rstate, probs = predict_fn(rstate, obs, dones)
             if args.verbose:
                 print([f"{p:.4f}" for p in probs[probs != 0].tolist()])
             actions = probs.argmax(axis=1)
@@ -306,4 +238,3 @@ if __name__ == "__main__":
         total_steps = (step - start_step) * num_envs
         print(f"SPS: {total_steps / total_time:.0f}, total_steps: {total_steps}")
         print(f"total: {total_time:.4f}, model: {model_time:.4f}, env: {env_time:.4f}")
-    

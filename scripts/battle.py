@@ -4,16 +4,20 @@ import os
 import random
 from typing import Optional, Literal
 from dataclasses import dataclass
+from tqdm import tqdm
 
 import ygoenv
 import numpy as np
 
-import optree
-
 import tyro
+
+import jax
+import jax.numpy as jnp
+import flax
 
 from ygoai.utils import init_ygopro
 from ygoai.rl.utils import RecordEpisodeStatistics
+from ygoai.rl.jax.agent2 import PPOLSTMAgent
 
 
 @dataclass
@@ -54,6 +58,8 @@ class Args:
     """the number of layers for the agent"""
     num_channels: int = 128
     """the number of channels for the agent"""
+    rnn_channels: Optional[int] = 512
+    """the number of rnn channels for the agent"""
     checkpoint1: str = "checkpoints/agent.pt"
     """the checkpoint to load for the first agent, `pt` or `flax_model` file"""
     checkpoint2: str = "checkpoints/agent.pt"
@@ -63,25 +69,30 @@ class Args:
     xla_device: Optional[str] = None
     """the XLA device to use, defaults to `None`"""
 
-    # PyTorch specific
-    torch_deterministic: bool = True
-    """if toggled, `torch.backends.cudnn.deterministic=False`"""
-    cuda: bool = True
-    """if toggled, cuda will be enabled by default"""
-    compile: bool = False
-    """if toggled, the model will be compiled"""
-    optimize: bool = False
-    """if toggled, the model will be optimized"""
-    torch_threads: Optional[int] = None
-    """the number of threads to use for torch, defaults to ($OMP_NUM_THREADS or 2) * world_size"""
-
     env_threads: Optional[int] = 16
     """the number of threads to use for envpool, defaults to `num_envs`"""
 
-    framework: Optional[Literal["torch", "jax"]] = None
+
+def create_agent(args):
+    return PPOLSTMAgent(
+        channels=args.num_channels,
+        num_layers=args.num_layers,
+        lstm_channels=args.rnn_channels,
+        embedding_shape=args.num_embeddings,
+    )
+
+
+def init_rnn_state(num_envs, rnn_channels):
+    return (
+        np.zeros((num_envs, rnn_channels)),
+        np.zeros((num_envs, rnn_channels)),
+    )
 
 
 if __name__ == "__main__":
+    from jax.experimental.compilation_cache import compilation_cache as cc
+    cc.set_cache_dir(os.path.expanduser("~/.cache/jax"))
+
     args = tyro.cli(Args)
 
     if args.record:
@@ -101,20 +112,8 @@ if __name__ == "__main__":
     random.seed(seed)
     np.random.seed(seed)
 
-    if args.framework is None:
-        args.framework = "jax" if "flax_model" in args.checkpoint1 else "torch"
-
-    if args.framework == "torch":
-        import torch
-        torch.manual_seed(args.seed)
-        torch.backends.cudnn.deterministic = args.torch_deterministic
-
-        args.torch_threads = args.torch_threads or int(os.getenv("OMP_NUM_THREADS", "4"))
-        torch.set_num_threads(args.torch_threads)
-        torch.set_float32_matmul_precision('high')
-    else:
-        if args.xla_device is not None:
-            os.environ.setdefault("JAX_PLATFORMS", args.xla_device)
+    if args.xla_device is not None:
+        os.environ.setdefault("JAX_PLATFORMS", args.xla_device)
 
     num_envs = args.num_envs
 
@@ -138,118 +137,67 @@ if __name__ == "__main__":
     envs.num_envs = num_envs
     envs = RecordEpisodeStatistics(envs)
 
-    if args.framework == 'torch':
-        from ygoai.rl.agent import PPOAgent as Agent
-        from ygoai.rl.buffer import create_obs
+    agent = create_agent(args)
+    key = jax.random.PRNGKey(args.seed)
+    key, agent_key = jax.random.split(key, 2)
+    sample_obs = jax.tree.map(lambda x: jnp.array([x]), obs_space.sample())
 
-        device = torch.device("cuda" if torch.cuda.is_available() and args.cuda else "cpu")
+    rstate = init_rnn_state(1, args.rnn_channels)
+    params = jax.jit(agent.init)(agent_key, (rstate, sample_obs))
 
-        if args.checkpoint1.endswith(".ptj"):
-            agent1 = torch.jit.load(args.checkpoint1)
-            agent2 = torch.jit.load(args.checkpoint2)
-        else:
-            # count lines of code_list
-            embedding_shape = args.num_embeddings
-            if embedding_shape is None:
-                with open(args.code_list_file, "r") as f:
-                    code_list = f.readlines()
-                    embedding_shape = len(code_list)
-            L = args.num_layers
-            agent1 = Agent(args.num_channels, L, L, embedding_shape).to(device)
-            agent2 = Agent(args.num_channels, L, L, embedding_shape).to(device)
-
-            for agent, ckpt in zip([agent1, agent2], [args.checkpoint1, args.checkpoint2]):
-                state_dict = torch.load(ckpt, map_location=device)
-                if not args.compile:
-                    prefix = "_orig_mod."
-                    state_dict = {k[len(prefix):] if k.startswith(prefix) else k: v for k, v in state_dict.items()}
-                print(agent.load_state_dict(state_dict))
-
-            def get_probs(agent, obs):
-                with torch.no_grad():
-                    return torch.softmax(agent(obs)[0], dim=-1)
-
-            if args.compile:
-                get_probs = torch.compile(get_probs, mode='reduce-overhead')
-            elif args.optimize:
-                obs = create_obs(envs.observation_space, (num_envs,), device=device)
-                def optimize_for_inference(agent):
-                    with torch.no_grad():
-                        traced_model = torch.jit.trace(agent, (obs,), check_tolerance=False, check_trace=False)
-                        return torch.jit.optimize_for_inference(traced_model)
-                agent1 = optimize_for_inference(agent1)
-                agent2 = optimize_for_inference(agent2)
-            
-            def predict_fn(obs, main):
-                obs = optree.tree_map(lambda x: torch.from_numpy(x).to(device=device), obs)
-                if num_envs != 1:
-                    probs1 = get_probs(agent, obs)
-                    probs2 = get_probs(agent, obs)
-                    probs = torch.where(main[:, None], probs1, probs2)
-                else:
-                    if main[0]:
-                        probs = get_probs(agent1, obs)
-                    else:
-                        probs = get_probs(agent2, obs)
-                probs = probs.cpu().numpy()
-                return probs
+    with open(args.checkpoint1, "rb") as f:
+        params1 = flax.serialization.from_bytes(params, f.read())
+    if args.checkpoint1 == args.checkpoint2:
+        params2 = params1
     else:
-        import jax
-        import jax.numpy as jnp
-        import flax
-        from ygoai.rl.jax.agent2 import PPOAgent
-        def create_agent(args):
-            return PPOAgent(
-                channels=128,
-                num_layers=2,
-                embedding_shape=args.num_embeddings,
-            )
+        with open(args.checkpoint2, "rb") as f:
+            params2 = flax.serialization.from_bytes(params, f.read())
+    
+    params1 = jax.device_put(params1)
+    params2 = jax.device_put(params2)
+    
+    @jax.jit
+    def get_probs(params, rstate, obs, done):
         agent = create_agent(args)
-        key = jax.random.PRNGKey(args.seed)
-        key, agent_key = jax.random.split(key, 2)
-        sample_obs = jax.tree.map(lambda x: jnp.array([x]), obs_space.sample())
-        params = agent.init(agent_key, sample_obs)
-        print(jax.tree.leaves(params)[0].devices())
-        with open(args.checkpoint1, "rb") as f:
-            params1 = flax.serialization.from_bytes(params, f.read())
-        if args.checkpoint1 == args.checkpoint2:
-            params2 = params1
-        else:
-            with open(args.checkpoint2, "rb") as f:
-                params2 = flax.serialization.from_bytes(params, f.read())
+        next_rstate, logits = agent.apply(params, (rstate, obs))[:2]
+        probs = jax.nn.softmax(logits, axis=-1)
+        next_rstate = jax.tree.map(
+            lambda x: jnp.where(done[:, None], 0, x), next_rstate)
+        return next_rstate, probs
 
+    if args.num_envs != 1:
         @jax.jit
-        def get_probs(params, obs):
-            agent = create_agent(args)
-            logits = agent.apply(params, obs)[0]
-            return jax.nn.softmax(logits, axis=-1)
+        def get_probs2(params1, params2, rstate1, rstate2, obs, main, done):
+            next_rstate1, probs1 = get_probs(params1, rstate1, obs, done)
+            next_rstate2, probs2 = get_probs(params2, rstate2, obs, done)
+            probs = jnp.where(main[:, None], probs1, probs2)
+            rstate1 = jax.tree.map(
+                lambda x1, x2: jnp.where(main[:, None], x1, x2), next_rstate1, rstate1)
+            rstate2 = jax.tree.map(
+                lambda x1, x2: jnp.where(main[:, None], x2, x1), next_rstate2, rstate2)
+            return rstate1, rstate2, probs
 
-        if args.num_envs != 1:
-            @jax.jit
-            def get_probs2(params1, params2, obs, main):
-                probs1 = get_probs(params1, obs)
-                probs2 = get_probs(params2, obs)
-                probs = jnp.where(main[:, None], probs1, probs2)
-                return probs
+        def predict_fn(rstate1, rstate2, obs, main, done):
+            rstate1, rstate2, probs = get_probs2(params1, params2, rstate1, rstate2, obs, main, done)
+            return rstate1, rstate2, np.array(probs)
+    else:
+        def predict_fn(rstate1, rstate2, obs, main, done):
+            if main[0]:
+                rstate1, probs = get_probs(params1, rstate1, obs, done)
+            else:
+                rstate2, probs = get_probs(params2, rstate2, obs, done)
+            return rstate1, rstate2, np.array(probs)
 
-            def predict_fn(obs, main):
-                probs = get_probs2(params1, params2, obs, main)
-                return np.array(probs)
-        else:
-            def predict_fn(obs, main):
-                if main[0]:
-                    probs = get_probs(params1, obs)
-                else:
-                    probs = get_probs(params2, obs)
-                return np.array(probs)
-        
     obs, infos = envs.reset()
     next_to_play = infos['to_play']
+    dones = np.zeros(num_envs, dtype=np.bool_)
 
     episode_rewards = []
     episode_lengths = []
     win_rates = []
     win_reasons = []
+    win_players = []
+    win_agents = []
 
     step = 0
     start = time.time()
@@ -259,6 +207,10 @@ if __name__ == "__main__":
         np.zeros(num_envs // 2, dtype=np.int64),
         np.ones(num_envs - num_envs // 2, dtype=np.int64)
     ])
+    rstate1 = rstate2 = init_rnn_state(num_envs, args.rnn_channels)
+
+    if not args.verbose:
+        pbar = tqdm(total=args.num_episodes)
 
     model_time = env_time = 0
     while True:
@@ -268,9 +220,8 @@ if __name__ == "__main__":
             model_time = env_time = 0
 
         _start = time.time()
-
         main = next_to_play == main_player
-        probs = predict_fn(obs, main)
+        rstate1, rstate2, probs = predict_fn(rstate1, rstate2, obs, main, dones)
 
         actions = probs.argmax(axis=1)
         model_time += time.time() - _start
@@ -289,14 +240,24 @@ if __name__ == "__main__":
                 win_reason = infos['win_reason'][idx]
                 pl = 1 if to_play[idx] == main_player[idx] else -1
                 episode_length = infos['l'][idx]
-                episode_reward = infos['r'][idx] * pl
-                win = int(episode_reward > 0)
+                episode_reward = infos['r'][idx]
+                main_reward = episode_reward * pl
+                win = int(main_reward > 0)
+
+                win_player = 0 if (to_play[idx] == 0 and episode_reward > 0) or (to_play[idx] == 1 and episode_reward < 0) else 1
+                win_players.append(win_player)
+                win_agent = 1 if main_reward > 0 else 2
+                win_agents.append(win_agent)
 
                 episode_lengths.append(episode_length)
-                episode_rewards.append(episode_reward)
+                episode_rewards.append(main_reward)
                 win_rates.append(win)
                 win_reasons.append(1 if win_reason == 1 else 0)
-                sys.stderr.write(f"Episode {len(episode_lengths)}: length={episode_length}, reward={episode_reward}, win={win}, win_reason={win_reason}\n")
+                if args.verbose:
+                    print(f"Episode {len(episode_lengths)}: length={episode_length}, reward={main_reward}, win={win}, win_reason={win_reason}\n")
+                else:
+                    pbar.set_postfix(len=np.mean(episode_lengths), reward=np.mean(episode_rewards), win_rate=np.mean(win_rates))
+                    pbar.update(1)
 
                 # Only when num_envs=1, we switch the player here
                 if args.verbose:
@@ -305,10 +266,38 @@ if __name__ == "__main__":
         if len(episode_lengths) >= args.num_episodes:
             break
 
+    if not args.verbose:
+        pbar.close()
     print(f"len={np.mean(episode_lengths)}, reward={np.mean(episode_rewards)}, win_rate={np.mean(win_rates)}, win_reason={np.mean(win_reasons)}")
+
+    win_players = np.array(win_players)
+    win_agents = np.array(win_agents)
+    N = len(win_players)
+
+    N1 = np.sum((win_players == 0) & (win_agents == 1))
+    N2 = np.sum((win_players == 0) & (win_agents == 2))
+    N3 = np.sum((win_players == 1) & (win_agents == 1))
+    N4 = np.sum((win_players == 1) & (win_agents == 2))
+
+    print(f"Payoff matrix:")
+    w1 = N1 / N
+    w2 = N2 / N
+    w3 = N3 / N
+    w4 = N4 / N
+    print(f"   agent1  agent2")
+    print(f"0  {w1:.4f}  {w2:.4f}")
+    print(f"1  {w3:.4f}  {w4:.4f}")
+
+    print(f"0/1 matrix, win rates of agentX as playerY")
+    w1 = N1 / (N1 + N4)
+    w2 = N2 / (N2 + N3)
+    w3 = 1 - w2
+    w4 = 1 - w1
+    print(f"   agent1  agent2")
+    print(f"0  {w1:.4f}  {w2:.4f}")
+    print(f"1  {w3:.4f}  {w4:.4f}")
 
     total_time = time.time() - start
     total_steps = (step - start_step) * num_envs
     print(f"SPS: {total_steps / total_time:.0f}, total_steps: {total_steps}")
     print(f"total: {total_time:.4f}, model: {model_time:.4f}, env: {env_time:.4f}")
-    
