@@ -26,7 +26,7 @@ from ygoai.utils import init_ygopro, load_embeddings
 from ygoai.rl.jax.agent2 import PPOLSTMAgent
 from ygoai.rl.jax.utils import RecordEpisodeStatistics, masked_normalize, categorical_sample
 from ygoai.rl.jax.eval import evaluate, battle
-from ygoai.rl.jax import clipped_surrogate_pg_loss, mse_loss, entropy_loss, simple_policy_loss
+from ygoai.rl.jax import clipped_surrogate_pg_loss, mse_loss, entropy_loss, simple_policy_loss, ach_loss
 from ygoai.rl.jax.switch import truncated_gae_2p0s
 
 
@@ -98,6 +98,8 @@ class Args:
     """the dual surrogate clipping coefficient, typically 3.0"""
     spo_kld_max: Optional[float] = None
     """the maximum KLD for the SPO policy, typically 0.02"""
+    logits_threshold: Optional[float] = None
+    """the logits threshold for NeuRD and ACH, typically 2.0-6.0"""
     ent_coef: float = 0.01
     """coefficient of the entropy"""
     vf_coef: float = 0.5
@@ -635,6 +637,9 @@ if __name__ == "__main__":
         if args.spo_kld_max is not None:
             pg_loss = simple_policy_loss(
                 ratios, logits, new_logits, advantages, args.spo_kld_max)
+        elif args.logits_threshold is not None:
+            pg_loss = ach_loss(
+                actions, logits, new_logits, advantages, args.logits_threshold, args.clip_coef, args.dual_clip_coef)
         else:
             pg_loss = clipped_surrogate_pg_loss(
                 ratios, advantages, args.clip_coef, args.dual_clip_coef)
