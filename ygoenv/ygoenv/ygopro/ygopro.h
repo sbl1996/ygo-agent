@@ -548,6 +548,25 @@ static std::string reason_to_string(uint8_t reason) {
   }
 }
 
+#define DEFINE_X_TO_ID_FUN(name, x_map) \
+inline uint8_t name(decltype(x_map)::key_type x) { \
+  auto it = x_map.find(x); \
+  if (it != x_map.end()) { \
+    return it->second; \
+  } \
+  throw std::runtime_error( \
+    fmt::format("[" #name "] cannot find id: {}", x)); \
+}
+
+#define DEFINE_X_TO_STRING_FUN(name, x_map) \
+inline std::string name(decltype(x_map)::key_type x) { \
+  auto it = x_map.find(x); \
+  if (it != x_map.end()) { \
+    return it->second; \
+  } \
+  return "unknown"; \
+}
+
 static const std::map<uint8_t, std::string> location2str = {
     {LOCATION_DECK, "Deck"},
     {LOCATION_HAND, "Hand"},
@@ -560,14 +579,8 @@ static const std::map<uint8_t, std::string> location2str = {
 
 static const ankerl::unordered_dense::map<uint8_t, uint8_t> location2id =
     make_ids(location2str, 1);
+DEFINE_X_TO_ID_FUN(location_to_id, location2id)
 
-inline uint8_t location_to_id(uint8_t location) {
-  auto it = location2id.find(location);
-  if (it != location2id.end()) {
-    return it->second;
-  }
-  return 0;
-}
 
 #define POS_NONE 0x0 // xyz materials (overlay)
 
@@ -582,9 +595,12 @@ static const std::map<uint8_t, std::string> position2str = {
     {POS_FACEDOWN, "face-down"},
     {POS_DEFENSE, "defense"},
 };
+DEFINE_X_TO_STRING_FUN(position_to_string, position2str)
 
 static const ankerl::unordered_dense::map<uint8_t, uint8_t> position2id =
     make_ids(position2str);
+DEFINE_X_TO_ID_FUN(position_to_id, position2id)
+
 
 #define ATTRIBUTE_NONE 0x0 // token
 
@@ -594,9 +610,12 @@ static const std::map<uint8_t, std::string> attribute2str = {
     {ATTRIBUTE_WIND, "Wind"},   {ATTRIBUTE_LIGHT, "Light"},
     {ATTRIBUTE_DARK, "Dark"},   {ATTRIBUTE_DEVINE, "Divine"},
 };
+DEFINE_X_TO_STRING_FUN(attribute_to_string, attribute2str)
 
 static const ankerl::unordered_dense::map<uint8_t, uint8_t> attribute2id =
     make_ids(attribute2str);
+DEFINE_X_TO_ID_FUN(attribute_to_id, attribute2id)
+
 
 #define RACE_NONE 0x0 // token
 
@@ -631,6 +650,8 @@ static const std::map<uint32_t, std::string> race2str = {
 
 static const ankerl::unordered_dense::map<uint32_t, uint8_t> race2id =
     make_ids(race2str);
+DEFINE_X_TO_ID_FUN(race_to_id, race2id)
+
 
 static const std::map<uint32_t, std::string> type2str = {
     {TYPE_MONSTER, "Monster"},
@@ -681,9 +702,12 @@ static const std::map<int, std::string> phase2str = {
     {PHASE_MAIN2, "main2 phase"},
     {PHASE_END, "end phase"},
 };
+DEFINE_X_TO_STRING_FUN(phase_to_string, phase2str)
 
 static const ankerl::unordered_dense::map<int, uint8_t> phase2id =
     make_ids(phase2str);
+DEFINE_X_TO_ID_FUN(phase_to_id, phase2id)
+
 
 static const std::vector<int> _msgs = {
     MSG_SELECT_IDLECMD,  MSG_SELECT_CHAIN,     MSG_SELECT_CARD,
@@ -695,15 +719,23 @@ static const std::vector<int> _msgs = {
 
 static const ankerl::unordered_dense::map<int, uint8_t> msg2id =
     make_ids(_msgs, 1);
+DEFINE_X_TO_ID_FUN(msg_to_id, msg2id)
+
 
 static const ankerl::unordered_dense::map<char, uint8_t> cmd_act2id =
     make_ids({'t', 'r', 'c', 's', 'm', 'a', 'v'}, 1);
+DEFINE_X_TO_ID_FUN(cmd_act_to_id, cmd_act2id)
+
 
 static const ankerl::unordered_dense::map<char, uint8_t> cmd_phase2id =
     make_ids(std::vector<char>({'b', 'm', 'e'}), 1);
+DEFINE_X_TO_ID_FUN(cmd_phase_to_id, cmd_phase2id)
+
 
 static const ankerl::unordered_dense::map<char, uint8_t> cmd_yesno2id =
     make_ids(std::vector<char>({'y', 'n'}), 1);
+DEFINE_X_TO_ID_FUN(cmd_yesno_to_id, cmd_yesno2id)
+
 
 static const ankerl::unordered_dense::map<std::string, uint8_t> cmd_place2id =
     make_ids(std::vector<std::string>(
@@ -712,22 +744,8 @@ static const ankerl::unordered_dense::map<std::string, uint8_t> cmd_place2id =
                   "om2", "om3", "om4", "om5", "om6", "om7", "os1", "os2",
                   "os3", "os4", "os5", "os6", "os7", "os8"}),
              1);
+DEFINE_X_TO_ID_FUN(cmd_place_to_id, cmd_place2id)
 
-inline std::string phase_to_string(int phase) {
-  auto it = phase2str.find(phase);
-  if (it != phase2str.end()) {
-    return it->second;
-  }
-  return "unknown";
-}
-
-inline std::string position_to_string(int position) {
-  auto it = position2str.find(position);
-  if (it != position2str.end()) {
-    return it->second;
-  }
-  return "unknown";
-}
 
 inline std::pair<uint8_t, uint8_t> float_transform(int x) {
   x = x % 65536;
@@ -993,9 +1011,21 @@ static ankerl::unordered_dense::map<std::string, std::vector<CardCode>>
     extra_decks_;
 static std::vector<std::string> deck_names_;
 
-inline const Card &c_get_card(CardCode code) { return cards_.at(code); }
+inline const Card &c_get_card(CardCode code) {
+  auto it = cards_.find(code);
+  if (it != cards_.end()) {
+    return it->second;
+  }
+  throw std::runtime_error("[c_get_card] Card not found: " + std::to_string(code));
+}
 
-inline CardId &c_get_card_id(CardCode code) { return card_ids_.at(code); }
+inline CardId &c_get_card_id(CardCode code) {
+  auto it = card_ids_.find(code);
+  if (it != card_ids_.end()) {
+    return it->second;
+  }
+  throw std::runtime_error("[c_get_card_id] Card not found: " + std::to_string(code));
+}
 
 inline void sort_extra_deck(std::vector<CardCode> &deck) {
   std::vector<CardCode> c;
@@ -1728,9 +1758,23 @@ public:
     }
   }
 
+  int get_ms_spec_idx(const std::string &spec) const {
+    auto it = ms_spec2idx_.find(spec);
+    if (it != ms_spec2idx_.end()) {
+      return it->second;
+    }
+    // print ms_spec2idx
+    fmt::print("ms_spec2idx: ");
+    for (const auto &[k, v] : ms_spec2idx_) {
+      fmt::print("({}, {}), ", k, v);
+    }
+    fmt::print("\n");
+    throw std::runtime_error("Spec not found: " + spec);
+  }
+
   void _callback_multi_select_2(int idx) {
     const auto &option = options_[idx];
-    idx = ms_spec2idx_.at(option);
+    idx = get_ms_spec_idx(option);
     ms_r_idxs_.push_back(idx);
     std::vector<std::vector<int>> combs;
     for (auto &c : ms_combs_) {
@@ -1777,7 +1821,7 @@ public:
     if (option == "f") {
       finish = true;
     } else {
-      idx = ms_spec2idx_.at(option);
+      idx = get_ms_spec_idx(option);
       ms_r_idxs_.push_back(idx);
     }
     if (finish) {
@@ -1965,7 +2009,7 @@ private:
           auto n_cards = YGO_QueryFieldCount(pduel_, player, location);
           loc_n_cards.push_back(n_cards);
           for (auto i = 0; i < n_cards; i++) {
-            f_cards(offset, 2) = location2id.at(location);
+            f_cards(offset, 2) = location_to_id(location);
             f_cards(offset, 4) = 1;
             offset++;
           }
@@ -2010,7 +2054,7 @@ private:
       f_cards(offset, 0) = static_cast<uint8_t>(card_id >> 8);
       f_cards(offset, 1) = static_cast<uint8_t>(card_id & 0xff);
     }
-    f_cards(offset, 2) = location2id.at(location);
+    f_cards(offset, 2) = location_to_id(location);
 
     uint8_t seq = 0;
     if (location == LOCATION_MZONE || location == LOCATION_SZONE ||
@@ -2020,14 +2064,14 @@ private:
     f_cards(offset, 3) = seq;
     f_cards(offset, 4) = (c.controler_ != to_play_) ? 1 : 0;
     if (overlay) {
-      f_cards(offset, 5) = position2id.at(POS_FACEUP);
+      f_cards(offset, 5) = position_to_id(POS_FACEUP);
       f_cards(offset, 6) = 1;
     } else {
-      f_cards(offset, 5) = position2id.at(c.position_);
+      f_cards(offset, 5) = position_to_id(c.position_);
     }
     if (!hide) {
-      f_cards(offset, 7) = attribute2id.at(c.attribute_);
-      f_cards(offset, 8) = race2id.at(c.race_);
+      f_cards(offset, 7) = attribute_to_id(c.attribute_);
+      f_cards(offset, 8) = race_to_id(c.race_);
       f_cards(offset, 9) = c.level_;
       f_cards(offset, 10) = std::min(c.counter_, static_cast<uint32_t>(15));
       f_cards(offset, 11) = static_cast<uint8_t>((c.status_ & (STATUS_DISABLED | STATUS_FORBIDDEN)) != 0);
@@ -2059,7 +2103,7 @@ private:
     feat(3) = op_lp_2;
 
     feat(4) = std::min(turn_count_, 16);
-    feat(5) = phase2id.at(current_phase_);
+    feat(5) = phase_to_id(current_phase_);
     feat(6) = (me == 0) ? 1 : 0;
     feat(7) = (me == tp_) ? 1 : 0;
 
@@ -2100,20 +2144,20 @@ private:
   }
 
   void _set_obs_action_msg(TArray<uint8_t> &feat, int i, int msg) {
-    feat(i, 2) = msg2id.at(msg);
+    feat(i, 2) = msg_to_id(msg);
   }
 
   void _set_obs_action_act(TArray<uint8_t> &feat, int i, char act,
                            uint8_t act_offset = 0) {
-    feat(i, 3) = cmd_act2id.at(act) + act_offset;
+    feat(i, 3) = cmd_act_to_id(act) + act_offset;
   }
 
   void _set_obs_action_yesno(TArray<uint8_t> &feat, int i, char yesno) {
-    feat(i, 4) = cmd_yesno2id.at(yesno);
+    feat(i, 4) = cmd_yesno_to_id(yesno);
   }
 
   void _set_obs_action_phase(TArray<uint8_t> &feat, int i, char phase) {
-    feat(i, 5) = cmd_phase2id.at(phase);
+    feat(i, 5) = cmd_phase_to_id(phase);
   }
 
   void _set_obs_action_cancel(TArray<uint8_t> &feat, int i) {
@@ -2126,7 +2170,7 @@ private:
 
   void _set_obs_action_position(TArray<uint8_t> &feat, int i, char position) {
     position = 1 << (position - '1');
-    feat(i, 8) = position2id.at(position);
+    feat(i, 8) = position_to_id(position);
   }
 
   void _set_obs_action_option(TArray<uint8_t> &feat, int i, char option) {
@@ -2138,11 +2182,11 @@ private:
   }
 
   void _set_obs_action_place(TArray<uint8_t> &feat, int i, const std::string &spec) {
-    feat(i, 11) = cmd_place2id.at(spec);
+    feat(i, 11) = cmd_place_to_id(spec);
   }
 
   void _set_obs_action_attrib(TArray<uint8_t> &feat, int i, uint8_t attrib) {
-    feat(i, 12) = attribute2id.at(attrib);
+    feat(i, 12) = attribute_to_id(attrib);
   }
 
   void _set_obs_action(TArray<uint8_t> &feat, int i, int msg,
@@ -2227,7 +2271,7 @@ private:
       offset++;
     }
     auto [loc, seq, pos] = spec_to_ls(spec.substr(offset));
-    return card_ids_.at(get_card_code(player, loc, seq));
+    return c_get_card_id(get_card_code(player, loc, seq));
   }
 
   CardId parse_card_id(const std::string &option, PlayerId player) {
@@ -2741,7 +2785,7 @@ private:
       spec = "deck";
     }
     if ((card.controler_ != pl) && (card.position_ & POS_FACEDOWN)) {
-      return position2str.at(card.position_) + "card (" + spec + ")";
+      return position_to_string(card.position_) + "card (" + spec + ")";
     }
     return card.name_ + " (" + spec + ")";
   }
@@ -4564,7 +4608,7 @@ private:
                    " attributes separated by spaces:");
         for (int i = 0; i < attrs.size(); i++) {
           pl->notify(std::to_string(attrs[i]) + ": " +
-                     attribute2str.at(1 << (attrs[i] - 1)));
+                     attribute_to_string(1 << (attrs[i] - 1)));
         }
       }
 
