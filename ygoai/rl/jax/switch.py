@@ -32,8 +32,8 @@ def truncated_gae_2p0s(
     _, (advantages, returns) = jax.lax.scan(
         body_fn, carry, (next_dones, values, rewards, switch), reverse=True
     )
+    targets = values + advantages
     if upgo:
         advantages += returns - values
-    targets = values + advantages
     targets = jax.lax.stop_gradient(targets)
     return targets, advantages

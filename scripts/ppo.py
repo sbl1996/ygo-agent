@@ -23,6 +23,7 @@ from rich.pretty import pprint
 from tensorboardX import SummaryWriter
 
 from ygoai.utils import init_ygopro, load_embeddings
+from ygoai.rl.ckpt import ModelCheckpoint
 from ygoai.rl.jax.agent2 import PPOLSTMAgent
 from ygoai.rl.jax.utils import RecordEpisodeStatistics, masked_normalize, categorical_sample
 from ygoai.rl.jax.eval import evaluate, battle
@@ -45,6 +46,10 @@ class Args:
     """the frequency of saving the model (in terms of `updates`)"""
     checkpoint: Optional[str] = None
     """the path to the model checkpoint to load"""
+    checkpoint_dir: str = "checkpoints"
+    """the directory to save the model checkpoints"""
+    gcs_bucket: Optional[str] = None
+    """the GCS bucket to save the model checkpoints"""
 
     # Algorithm specific arguments
     env_id: str = "YGOPro-v0"
@@ -525,6 +530,14 @@ if __name__ == "__main__":
         "|param|value|\n|-|-|\n%s" % ("\n".join([f"|{key}|{value}|" for key, value in vars(args).items()])),
     )
 
+
+    def save_fn(obj, path):
+        with open(path, "wb") as f:
+            f.write(flax.serialization.to_bytes(obj))
+
+    ckpt_maneger = ModelCheckpoint(
+        args.checkpoint_dir, save_fn, n_saved=3, gcs_bucket=args.gcs_bucket)
+
     # seeding
     random.seed(args.seed)
     np.random.seed(args.seed)
@@ -854,15 +867,9 @@ if __name__ == "__main__":
             writer.add_scalar("losses/loss", loss, global_step)
 
         if args.local_rank == 0 and learner_policy_version % args.save_interval == 0:
-            ckpt_dir = f"checkpoints"
-            os.makedirs(ckpt_dir, exist_ok=True)
             M_steps = args.batch_size * learner_policy_version // (2**20)
-            model_path = os.path.join(ckpt_dir, f"{timestamp}_{M_steps}M.flax_model")
-            with open(model_path, "wb") as f:
-                f.write(
-                    flax.serialization.to_bytes(unreplicated_params)
-                )
-            print(f"model saved to {model_path}")   
+            ckpt_name = f"{timestamp}_{M_steps}M.flax_model"
+            ckpt_maneger.save(unreplicated_params, ckpt_name)
 
         if learner_policy_version >= args.num_updates:
             break
