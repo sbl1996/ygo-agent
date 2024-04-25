@@ -30,13 +30,13 @@ assets/locale/en assets/locale/zh:
 	mkdir -p $@
 
 assets/locale/en/cards.cdb: assets/locale/en
-	wget $(DATABASE_REPO)/en-US/cards.cdb -O $@
+	wget -nv $(DATABASE_REPO)/en-US/cards.cdb -O $@
 
 assets/locale/en/strings.conf: assets/locale/en
-	wget $(DATABASE_REPO)/en-US/strings.conf -O $@
+	wget -nv $(DATABASE_REPO)/en-US/strings.conf -O $@
 
 assets/locale/zh/cards.cdb: assets/locale/zh
-	wget $(DATABASE_REPO)/zh-CN/cards.cdb -O $@
+	wget -nv $(DATABASE_REPO)/zh-CN/cards.cdb -O $@
 
 assets/locale/zh/strings.conf: assets/locale/zh
-	wget $(DATABASE_REPO)/zh-CN/strings.conf -O $@
+	wget -nv $(DATABASE_REPO)/zh-CN/strings.conf -O $@
