@@ -1763,7 +1763,13 @@ public:
     if (it != ms_spec2idx_.end()) {
       return it->second;
     }
+    // TODO: find the root cause
     // print ms_spec2idx
+    show_deck(0);
+    show_deck(1);
+    show_buffer();
+    show_turn();
+    fmt::println("MS: idx: {}, mode: {}, min: {}, max: {}, must: {}, specs: {}, combs: {}", ms_idx_, ms_mode_, ms_min_, ms_max_, ms_must_, ms_specs_, ms_combs_);
     fmt::print("ms_spec2idx: ");
     for (const auto &[k, v] : ms_spec2idx_) {
       fmt::print("({}, {}), ", k, v);

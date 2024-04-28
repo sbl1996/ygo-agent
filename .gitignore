@@ -13,9 +13,9 @@
 *.npy
 
 .vscode/
-checkpoints/
-runs/
-logs/
+checkpoints
+runs
+logs
 k8s_job/
 script
 assets/locale/*/*.cdb
