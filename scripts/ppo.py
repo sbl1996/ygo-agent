@@ -587,12 +587,12 @@ if __name__ == "__main__":
         ),
         every_k_schedule=1,
     )
+    tx = optax.apply_if_finite(tx, max_consecutive_errors=3)
     agent_state = TrainState.create(
         apply_fn=None,
         params=params,
         tx=tx,
     )
-
     if args.checkpoint:
         with open(args.checkpoint, "rb") as f:
             params = flax.serialization.from_bytes(params, f.read())
@@ -862,7 +862,7 @@ if __name__ == "__main__":
                 f"data_time={rollout_queue_get_time[-1]:.2f}"
             )
             writer.add_scalar(
-                "charts/learning_rate", agent_state.opt_state[2][1].hyperparams["learning_rate"][-1].item(), global_step
+                "charts/learning_rate", agent_state.opt_state[3][2][1].hyperparams["learning_rate"][-1].item(), global_step
             )
             writer.add_scalar("losses/value_loss", v_loss[-1].item(), global_step)
             writer.add_scalar("losses/policy_loss", pg_loss[-1].item(), global_step)
