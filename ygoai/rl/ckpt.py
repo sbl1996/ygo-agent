@@ -1,5 +1,4 @@
 import os
-import shutil
 from pathlib import Path
 import zipfile
 
@@ -37,17 +36,13 @@ class ModelCheckpoint(object):
         self._saved.append(path)
         print(f"Saved model to {path}")
 
-        # Copy the lastest checkpoint as latest
-        lastest_path = path.with_name("latest" + path.suffix)
-        shutil.copyfile(path, lastest_path)
-
         if len(self._saved) > self._n_saved:
             path = self._saved.pop(0)
             os.remove(path)
     
     def get_latest(self):
         path = self._saved[-1]
-        return str(path.with_name("latest" + path.suffix))
+        return path
 
 
 def sync_to_gcs(bucket, source, dest=None):
