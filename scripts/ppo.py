@@ -105,7 +105,7 @@ class Args:
     """Toggles advantages normalization"""
     clip_coef: float = 0.25
     """the surrogate clipping coefficient"""
-    dual_clip_coef: Optional[float] = None
+    dual_clip_coef: Optional[float] = 3.0
     """the dual surrogate clipping coefficient, typically 3.0"""
     spo_kld_max: Optional[float] = None
     """the maximum KLD for the SPO policy, typically 0.02"""

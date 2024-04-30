@@ -110,11 +110,11 @@ class Args:
     """whether to use the PPO clipping to replace V-Trace surrogate clipping"""
     clip_coef: float = 0.25
     """the PPO surrogate clipping coefficient"""
-    dual_clip_coef: Optional[float] = None
-    """the dual surrogate clipping coefficient"""
+    dual_clip_coef: Optional[float] = 3.0
+    """the dual surrogate clipping coefficient, typically 3.0"""
     ent_coef: float = 0.01
     """coefficient of the entropy"""
-    vf_coef: float = 0.5
+    vf_coef: float = 1.0
     """coefficient of the value function"""
     max_grad_norm: float = 1.0
     """the maximum norm for the gradient clipping"""
