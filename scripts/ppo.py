@@ -47,6 +47,8 @@ class Args:
     """the frequency of saving the model (in terms of `updates`)"""
     checkpoint: Optional[str] = None
     """the path to the model checkpoint to load"""
+    debug: bool = False
+    """whether to run the script in debug mode"""
 
     tb_dir: str = "runs"
     """the directory to save the tensorboard logs"""
@@ -156,7 +158,7 @@ class Args:
     actor_devices: Optional[List[str]] = None
     learner_devices: Optional[List[str]] = None
     num_embeddings: Optional[int] = None
-    freeze_id: bool = False
+    freeze_id: Optional[bool] = None
 
 
 def make_env(args, seed, num_envs, num_threads, mode='self', thread_affinity_offset=-1, eval=False):
@@ -254,28 +256,27 @@ def rollout(
 
     @jax.jit
     def get_logits(
-        params: flax.core.FrozenDict, inputs, done):
+        params: flax.core.FrozenDict, inputs):
         rstate, logits = create_agent(args).apply(params, inputs)[:2]
-        rstate = jax.tree.map(lambda x: jnp.where(done[:, None], 0, x), rstate)
         return rstate, logits
 
     @jax.jit
     def get_action(
         params: flax.core.FrozenDict, inputs):
-        batch_size = jax.tree.leaves(inputs)[0].shape[0]
-        done = jnp.zeros(batch_size, dtype=jnp.bool_)
-        rstate, logits = get_logits(params, inputs, done)
+        rstate, logits = get_logits(params, inputs)
         return rstate, logits.argmax(axis=1)
 
     @jax.jit
     def get_action_battle(params1, params2, rstate1, rstate2, obs, main, done):
-        next_rstate1, logits1 = get_logits(params1, (rstate1, obs), done)
-        next_rstate2, logits2 = get_logits(params2, (rstate2, obs), done)
+        next_rstate1, logits1 = get_logits(params1, (rstate1, obs))
+        next_rstate2, logits2 = get_logits(params2, (rstate2, obs))
         logits = jnp.where(main[:, None], logits1, logits2)
         rstate1 = jax.tree.map(
             lambda x1, x2: jnp.where(main[:, None], x1, x2), next_rstate1, rstate1)
         rstate2 = jax.tree.map(
             lambda x1, x2: jnp.where(main[:, None], x2, x1), next_rstate2, rstate2)
+        rstate1, rstate2 = jax.tree.map(
+            lambda x: jnp.where(done[:, None], 0, x), (rstate1, rstate2))
         return rstate1, rstate2, logits.argmax(axis=1)
 
     @jax.jit
@@ -285,12 +286,14 @@ def rollout(
         next_obs = jax.tree.map(lambda x: jnp.array(x), next_obs)
         done = jnp.array(done)
         main = jnp.array(main)
+
         rstate = jax.tree.map(
             lambda x1, x2: jnp.where(main[:, None], x1, x2), rstate1, rstate2)
-        rstate, logits = get_logits(params, (rstate, next_obs), done)
+        rstate, logits = get_logits(params, (rstate, next_obs))
         rstate1 = jax.tree.map(lambda x, y: jnp.where(main[:, None], x, y), rstate, rstate1)
         rstate2 = jax.tree.map(lambda x, y: jnp.where(main[:, None], y, x), rstate, rstate2)
-
+        rstate1, rstate2 = jax.tree.map(
+            lambda x: jnp.where(done[:, None], 0, x), (rstate1, rstate2))
         action, key = categorical_sample(logits, key)
         return next_obs, done, main, rstate1, rstate2, action, logits, key
 
@@ -532,7 +535,7 @@ if __name__ == "__main__":
     dummy_writer.add_scalar = lambda x, y, z: None
 
     tb_log_dir = f"{args.tb_dir}/{run_name}"
-    if args.local_rank == 0:
+    if args.local_rank == 0 and not args.debug:
         writer = SummaryWriter(tb_log_dir)
         writer.add_text(
             "hyperparameters",
@@ -692,6 +695,7 @@ if __name__ == "__main__":
         learn_opponent: bool = False,
     ):
         storage = jax.tree.map(lambda *x: jnp.hstack(x), *sharded_storages)
+        # TODO: rstate will be out-date after the first update, maybe consider R2D2
         next_inputs, init_rstate1, init_rstate2 = [
             jax.tree.map(lambda *x: jnp.concatenate(x), *x)
             for x in [sharded_next_inputs, sharded_init_rstate1, sharded_init_rstate2]
@@ -874,7 +878,7 @@ if __name__ == "__main__":
             writer.add_scalar("losses/approx_kl", approx_kl[-1].item(), global_step)
             writer.add_scalar("losses/loss", loss, global_step)
 
-        if args.local_rank == 0 and learner_policy_version % args.save_interval == 0:
+        if args.local_rank == 0 and learner_policy_version % args.save_interval == 0 and not args.debug:
             M_steps = args.batch_size * learner_policy_version // (2**20)
             ckpt_name = f"{timestamp}_{M_steps}M.flax_model"
             ckpt_maneger.save(unreplicated_params, ckpt_name)

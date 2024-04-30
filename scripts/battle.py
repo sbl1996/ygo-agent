@@ -157,24 +157,26 @@ if __name__ == "__main__":
     params2 = jax.device_put(params2)
     
     @jax.jit
-    def get_probs(params, rstate, obs, done):
+    def get_probs(params, rstate, obs, done=None):
         agent = create_agent(args)
         next_rstate, logits = agent.apply(params, (rstate, obs))[:2]
         probs = jax.nn.softmax(logits, axis=-1)
-        next_rstate = jax.tree.map(
-            lambda x: jnp.where(done[:, None], 0, x), next_rstate)
+        if done is not None:
+            next_rstate = jnp.where(done[:, None], 0, next_rstate)
         return next_rstate, probs
 
     if args.num_envs != 1:
         @jax.jit
         def get_probs2(params1, params2, rstate1, rstate2, obs, main, done):
-            next_rstate1, probs1 = get_probs(params1, rstate1, obs, done)
-            next_rstate2, probs2 = get_probs(params2, rstate2, obs, done)
+            next_rstate1, probs1 = get_probs(params1, rstate1, obs)
+            next_rstate2, probs2 = get_probs(params2, rstate2, obs)
             probs = jnp.where(main[:, None], probs1, probs2)
             rstate1 = jax.tree.map(
                 lambda x1, x2: jnp.where(main[:, None], x1, x2), next_rstate1, rstate1)
             rstate2 = jax.tree.map(
                 lambda x1, x2: jnp.where(main[:, None], x2, x1), next_rstate2, rstate2)
+            rstate1, rstate2 = jax.tree.map(
+                lambda x: jnp.where(done[:, None], 0, x), (rstate1, rstate2))
             return rstate1, rstate2, probs
 
         def predict_fn(rstate1, rstate2, obs, main, done):

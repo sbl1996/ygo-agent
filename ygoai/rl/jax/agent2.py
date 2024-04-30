@@ -169,8 +169,6 @@ class Encoder(nn.Module):
         fc_layer = partial(nn.Dense, use_bias=False, param_dtype=self.param_dtype)
 
         id_embed = embed(n_embed, embed_dim)
-        if self.freeze_id:
-            id_embed = lambda x: jax.lax.stop_gradient(id_embed(x))
         action_encoder = ActionEncoder(
             channels=c, dtype=jnp.float32, param_dtype=self.param_dtype)
 
@@ -184,6 +182,8 @@ class Encoder(nn.Module):
 
         x_id = decode_id(x_cards[:, :, :2].astype(jnp.int32))
         x_id = id_embed(x_id)
+        if self.freeze_id:
+            x_id = jax.lax.stop_gradient(x_id)
 
         # Cards
         f_cards = CardEncoder(
@@ -215,9 +215,12 @@ class Encoder(nn.Module):
         h_mask = h_mask.at[:, 0].set(False)
 
         x_h_id = decode_id(x_h_actions[..., :2])
+        x_h_id = id_embed(x_h_id)
+        if self.freeze_id:
+            x_h_id = jax.lax.stop_gradient(x_h_id)
         x_h_id = MLP(
             (c, c), dtype=jnp.float32, param_dtype=self.param_dtype,
-            kernel_init=default_fc_init2)(id_embed(x_h_id))
+            kernel_init=default_fc_init2)(x_h_id)
 
         x_h_a_feats1 = action_encoder(x_h_actions[:, :, 2:13])
 
@@ -379,9 +382,9 @@ class PPOLSTMAgent(nn.Module):
                     rstate1, rstate2 = carry
                     rstate = jax.tree.map(lambda x1, x2: jnp.where(main[:, None], x1, x2), rstate1, rstate2)
                     rstate, y = cell(rstate, x)
-                    rstate = jax.tree.map(lambda x: jnp.where(done[:, None], 0, x), rstate)
                     rstate1 = jax.tree.map(lambda x, y: jnp.where(main[:, None], x, y), rstate, rstate1)
                     rstate2 = jax.tree.map(lambda x, y: jnp.where(main[:, None], y, x), rstate, rstate2)
+                    rstate1, rstate2 = jax.tree.map(lambda x: jnp.where(done[:, None], 0, x), (rstate1, rstate2))
                     return (rstate1, rstate2), y
             scan = nn.scan(
                 body_fn, variable_broadcast='params',

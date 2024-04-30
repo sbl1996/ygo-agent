@@ -48,7 +48,7 @@ def init_ygopro(env_id, lang, deck, code_list_file, preload_tokens=False):
 	return deck_name
 
 
-def load_embeddings(embedding_file, code_list_file):
+def load_embeddings(embedding_file, code_list_file, pad_to=999):
     with open(embedding_file, "rb") as f:
         embeddings = pickle.load(f)
     with open(code_list_file, "r") as f:
@@ -56,4 +56,8 @@ def load_embeddings(embedding_file, code_list_file):
         code_list = [int(code.strip()) for code in code_list]
     assert len(embeddings) == len(code_list), f"len(embeddings)={len(embeddings)}, len(code_list)={len(code_list)}"
     embeddings = np.array([embeddings[code] for code in code_list], dtype=np.float32)
+    if pad_to is not None:
+        assert pad_to >= len(embeddings), f"pad_to={pad_to} < len(embeddings)={len(embeddings)}"
+        pad = np.zeros((pad_to - len(embeddings), embeddings.shape[1]), dtype=np.float32)
+        embeddings = np.concatenate([embeddings, pad], axis=0)
     return embeddings
