@@ -595,7 +595,7 @@ if __name__ == "__main__":
         ),
         every_k_schedule=1,
     )
-    tx = optax.apply_if_finite(tx, max_consecutive_errors=3)
+    tx = optax.apply_if_finite(tx, max_consecutive_errors=10)
     agent_state = TrainState.create(
         apply_fn=None,
         params=params,
