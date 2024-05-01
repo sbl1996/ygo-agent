@@ -430,7 +430,6 @@ def rollout(
             eval_time = time.time() - _start
             other_time += eval_time
             eval_stats = np.array([eval_time, eval_return, eval_win_rate], dtype=np.float32)
-            print(eval_stats)
         else:
             eval_stats = None
 
@@ -846,14 +845,12 @@ if __name__ == "__main__":
 
         if update % args.eval_interval == 0:
             eval_stats = np.mean(eval_stat_list, axis=0)
-            print(eval_stats)
             eval_stats = jax.device_put(eval_stats, local_devices[0])
             eval_stats = np.array(all_reduce_value(eval_stats[None])[0])
             eval_time, eval_return, eval_win_rate = eval_stats
             writer.add_scalar(f"charts/eval_return", eval_return, global_step)
             writer.add_scalar(f"charts/eval_win_rate", eval_win_rate, global_step)
             print(f"eval_time={eval_time:.4f}, eval_return={eval_return:.4f}, eval_win_rate={eval_win_rate:.4f}")
-
 
         rollout_queue_get_time.append(time.time() - rollout_queue_get_time_start)
         training_time_start = time.time()
