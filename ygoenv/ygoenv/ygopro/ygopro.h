@@ -3836,17 +3836,19 @@ private:
       }
 
       if (discard_hand_) {
-        // random discard
-        std::vector<int> comb(size);
-        std::iota(comb.begin(), comb.end(), 0);
-        std::shuffle(comb.begin(), comb.end(), gen_);
-        resp_buf_[0] = min;
-        for (int i = 0; i < min; ++i) {
-          resp_buf_[i + 1] = comb[i];
-        }
-        YGO_SetResponseb(pduel_, resp_buf_);
         discard_hand_ = false;
-        return;
+        if (current_phase_ == PHASE_END) {
+          // random discard
+          std::vector<int> comb(size);
+          std::iota(comb.begin(), comb.end(), 0);
+          std::shuffle(comb.begin(), comb.end(), gen_);
+          resp_buf_[0] = min;
+          for (int i = 0; i < min; ++i) {
+            resp_buf_[i + 1] = comb[i];
+          }
+          YGO_SetResponseb(pduel_, resp_buf_);
+          return;
+        }
       }
 
       init_multi_select(min, max, 0, specs);
