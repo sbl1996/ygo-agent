@@ -1737,6 +1737,9 @@ public:
         }
       }
       if (ms_idx_ == ms_max_ - 1) {
+        if (ms_idx_ >= ms_min_) {
+          options_.push_back("f");
+        }
         callback_ = [this](int idx) {
           _callback_multi_select(idx, true);
         };
@@ -1769,13 +1772,14 @@ public:
     show_deck(1);
     show_buffer();
     show_turn();
-    fmt::println("MS: idx: {}, mode: {}, min: {}, max: {}, must: {}, specs: {}, combs: {}", ms_idx_, ms_mode_, ms_min_, ms_max_, ms_must_, ms_specs_, ms_combs_);
+    fmt::println("MS: idx: {}, mode: {}, min: {}, max: {}, must: {}, specs: {}, combs: {}, r_idx: {}", ms_idx_, ms_mode_, ms_min_, ms_max_, ms_must_, ms_specs_, ms_combs_, ms_r_idxs_);
     fmt::print("ms_spec2idx: ");
     for (const auto &[k, v] : ms_spec2idx_) {
       fmt::print("({}, {}), ", k, v);
     }
     fmt::print("\n");
-    throw std::runtime_error("Spec not found: " + spec);
+    return -1;
+    // throw std::runtime_error("Spec not found: " + spec);
   }
 
   void _callback_multi_select_2(int idx) {
@@ -1828,7 +1832,15 @@ public:
       finish = true;
     } else {
       idx = get_ms_spec_idx(option);
-      ms_r_idxs_.push_back(idx);
+      if (idx != -1) {
+        ms_r_idxs_.push_back(idx);
+      } else {
+        // TODO: find the root cause
+        fmt::println("options: {}, idx: {}, option: {}", options_, idx, option);
+        if (std::find(options_.begin(), options_.end(), "f") != options_.end()) {
+          finish = true;
+        }
+      }
     }
     if (finish) {
       ms_idx_ = -1;
@@ -1883,9 +1895,9 @@ public:
   }
 
   void show_deck(PlayerId player) const {
-    fmt::print("Player {}'s deck:\n", player);
-    show_deck(player == 0 ? main_deck0_ : main_deck1_, "Main");
-    show_deck(player == 0 ? extra_deck0_ : extra_deck1_, "Extra");
+    fmt::print("Player {}'s deck: {}\n", player, deck_name_[player]);
+    // show_deck(player == 0 ? main_deck0_ : main_deck1_, "Main");
+    // show_deck(player == 0 ? extra_deck0_ : extra_deck1_, "Extra");
   }
 
   void show_history_actions(PlayerId player) const {
