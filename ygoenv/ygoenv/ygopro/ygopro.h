@@ -2149,8 +2149,9 @@ private:
         fmt::println("MS: idx: {}, mode: {}, min: {}, max: {}, must: {}, specs: {}, combs: {}", ms_idx_, ms_mode_, ms_min_, ms_max_, ms_must_, ms_specs_, ms_combs_);
         fmt::println("Spec: {}, Spec2index:", spec);
         for (auto &[k, v] : spec2index) {
-          fmt::println("{}: {}", k, v);
+          fmt::print("{}: {}, ", k, v);
         }
+        fmt::print("\n");
         // throw std::runtime_error("Spec not found: " + spec);
         idx = 1;
       } else {
@@ -3863,6 +3864,15 @@ private:
         }
       }
 
+      if ((min == max) && (max == specs.size())) {
+        resp_buf_[0] = specs.size();
+        for (int i = 0; i < specs.size(); ++i) {
+          resp_buf_[i + 1] = i;
+        }
+        YGO_SetResponseb(pduel_, resp_buf_);
+        return;
+      }
+
       init_multi_select(min, max, 0, specs);
 
       to_play_ = player;
@@ -3932,6 +3942,16 @@ private:
       if (has_weight) {
         throw std::runtime_error("weight not implemented for select tribute");
         // combs = combinations_with_weight(release_params, min);
+      }
+
+      if (max == specs.size()) {
+        // tribute all
+        resp_buf_[0] = specs.size();
+        for (int i = 0; i < specs.size(); ++i) {
+          resp_buf_[i + 1] = i;
+        }
+        YGO_SetResponseb(pduel_, resp_buf_);
+        return;
       }
 
       init_multi_select(min, max, 0, specs);
