@@ -3864,6 +3864,7 @@ private:
         }
       }
 
+      // TODO: use this when added to history actions
       if ((min == max) && (max == specs.size())) {
         resp_buf_[0] = specs.size();
         for (int i = 0; i < specs.size(); ++i) {
@@ -3944,6 +3945,7 @@ private:
         // combs = combinations_with_weight(release_params, min);
       }
 
+      // TODO: use this when added to history actions
       if (max == specs.size()) {
         // tribute all
         resp_buf_[0] = specs.size();
