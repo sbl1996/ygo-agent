@@ -28,8 +28,8 @@ from ygoai.rl.ckpt import ModelCheckpoint, sync_to_gcs, zip_files
 from ygoai.rl.jax.agent2 import PPOLSTMAgent
 from ygoai.rl.jax.utils import RecordEpisodeStatistics, masked_normalize, categorical_sample
 from ygoai.rl.jax.eval import evaluate, battle
-from ygoai.rl.jax import clipped_surrogate_pg_loss, mse_loss, entropy_loss, simple_policy_loss, ach_loss
-from ygoai.rl.jax.switch import truncated_gae_2p0s
+from ygoai.rl.jax import clipped_surrogate_pg_loss, vtrace_2p0s, mse_loss, entropy_loss, simple_policy_loss, ach_loss, policy_gradient_loss
+from ygoai.rl.jax.switch import truncated_gae_2p0s as gae_2p0s_switch
 
 
 os.environ["XLA_FLAGS"] = "--xla_cpu_multi_thread_eigen=false intra_op_parallelism_threads=1"
@@ -97,20 +97,35 @@ class Args:
     """the number of mini-batches"""
     update_epochs: int = 2
     """the K epochs to update the policy"""
+    switch: bool = False
+    """Toggle the use of switch mechanism"""
     norm_adv: bool = False
     """Toggles advantages normalization"""
+
     upgo: bool = True
     """Toggle the use of UPGO for advantages"""
     gae_lambda: float = 0.95
     """the lambda for the general advantage estimation"""
+    c_clip_min: float = 0.001
+    """the minimum value of the importance sampling clipping"""
+    c_clip_max: float = 1.007
+    """the maximum value of the importance sampling clipping"""
+    rho_clip_min: float = 0.001
+    """the minimum value of the importance sampling clipping"""
+    rho_clip_max: float = 1.007
+    """the maximum value of the importance sampling clipping"""
+
+    ppo_clip: bool = True
+    """whether to use the PPO clipping to replace V-Trace surrogate clipping"""
     clip_coef: float = 0.25
-    """the surrogate clipping coefficient"""
+    """the PPO surrogate clipping coefficient"""
     dual_clip_coef: Optional[float] = 3.0
     """the dual surrogate clipping coefficient, typically 3.0"""
     spo_kld_max: Optional[float] = None
     """the maximum KLD for the SPO policy, typically 0.02"""
     logits_threshold: Optional[float] = None
     """the logits threshold for NeuRD and ACH, typically 2.0-6.0"""
+
     ent_coef: float = 0.01
     """coefficient of the entropy"""
     vf_coef: float = 1.0
@@ -203,7 +218,7 @@ def create_agent(args, multi_step=False):
         dtype=jnp.bfloat16 if args.bfloat16 else jnp.float32,
         param_dtype=jnp.float32,
         lstm_channels=args.rnn_channels,
-        switch=True,
+        switch=args.switch,
         multi_step=multi_step,
         freeze_id=args.freeze_id,
     )
@@ -382,15 +397,16 @@ def rollout(
                 if not d:
                     continue
                 cur_main = main[idx]
-                for j in reversed(range(len(storage) - 1)):
-                    t = storage[j]
-                    if t.next_dones[idx]:
-                        # For OTK where player may not switch
-                        break
-                    if t.mains[idx] != cur_main:
-                        t.next_dones[idx] = True
-                        t.rewards[idx] = -next_reward[idx]
-                        break
+                if args.switch:
+                    for j in reversed(range(len(storage) - 1)):
+                        t = storage[j]
+                        if t.next_dones[idx]:
+                            # For OTK where player may not switch
+                            break
+                        if t.mains[idx] != cur_main:
+                            t.next_dones[idx] = True
+                            t.rewards[idx] = -next_reward[idx]
+                            break
                 episode_reward = info['r'][idx] * (1 if cur_main else -1)
                 win = 1 if episode_reward > 0 else 0
                 avg_ep_returns.append(episode_reward)
@@ -628,7 +644,7 @@ if __name__ == "__main__":
 
     def loss_fn(
         params, rstate1, rstate2, obs, dones, next_dones,
-        switch, actions, logits, rewards, mask, next_value):
+        switch_or_mains, actions, logits, rewards, mask, next_value):
         # (num_steps * local_num_envs // n_mb))
         num_envs = next_value.shape[0]
         num_steps = dones.shape[0] // num_envs
@@ -638,9 +654,11 @@ if __name__ == "__main__":
 
         mask = mask * (1.0 - dones)
         n_valids = jnp.sum(mask)
-        dones = dones | next_dones
 
-        inputs = (rstate1, rstate2, obs, dones, switch)
+        if args.switch:
+            dones = dones | next_dones
+
+        inputs = (rstate1, rstate2, obs, dones, switch_or_mains)
         new_logits, new_values = get_logits_and_value(params, inputs)
 
         ratios = distrax.importance_sampling_ratios(distrax.Categorical(
@@ -648,13 +666,22 @@ if __name__ == "__main__":
         logratio = jnp.log(ratios)
         approx_kl = (((ratios - 1) - logratio) * mask).sum() / n_valids
 
-        new_values_, rewards, next_dones, switch = jax.tree.map(
-            reshape_time_series, (new_values, rewards, next_dones, switch),
+        new_values_, rewards, next_dones, switch_or_mains = jax.tree.map(
+            reshape_time_series, (new_values, rewards, next_dones, switch_or_mains),
         )
 
-        target_values, advantages = truncated_gae_2p0s(
-            next_value, new_values_, rewards, next_dones, switch,
-            args.gamma, args.gae_lambda, args.upgo)
+        # Advantages and target values
+        if args.switch:
+            target_values, advantages = gae_2p0s_switch(
+                next_value, new_values_, rewards, next_dones, switch_or_mains,
+                args.gamma, args.gae_lambda, args.upgo)
+        else:
+            # TODO: TD(lambda) for multi-step
+            ratios_ = reshape_time_series(ratios)
+            target_values, advantages = vtrace_2p0s(
+                next_value, ratios_, new_values_, rewards, next_dones, switch_or_mains, args.gamma,
+                args.rho_clip_min, args.rho_clip_max, args.c_clip_min, args.c_clip_max)
+
         target_values, advantages = jax.tree.map(
             lambda x: jnp.reshape(x, (-1,)), (target_values, advantages))
 
@@ -668,9 +695,12 @@ if __name__ == "__main__":
         elif args.logits_threshold is not None:
             pg_loss = ach_loss(
                 actions, logits, new_logits, advantages, args.logits_threshold, args.clip_coef, args.dual_clip_coef)
-        else:
+        elif args.ppo_clip:
             pg_loss = clipped_surrogate_pg_loss(
                 ratios, advantages, args.clip_coef, args.dual_clip_coef)
+        else:
+            pg_advs = jnp.clip(ratios, args.rho_clip_min, args.rho_clip_max) * advantages
+            pg_loss = policy_gradient_loss(new_logits, actions, pg_advs)
         pg_loss = jnp.sum(pg_loss * mask)
 
         v_loss = mse_loss(new_values, target_values)
@@ -707,13 +737,14 @@ if __name__ == "__main__":
         # reorder storage of individual players
         # main first, opponent second
         num_steps, num_envs = storage.rewards.shape
-        T = jnp.arange(num_steps, dtype=jnp.int32)
-        B = jnp.arange(num_envs, dtype=jnp.int32)
-        mains = storage.mains.astype(jnp.int32)
-        indices = jnp.argsort(T[:, None] - mains * num_steps, axis=0)
-        switch_steps = jnp.sum(mains, axis=0)
-        switch = T[:, None] == (switch_steps[None, :] - 1)
-        storage = jax.tree.map(lambda x: x[indices, B[None, :]], storage)
+        if args.switch:
+            T = jnp.arange(num_steps, dtype=jnp.int32)
+            B = jnp.arange(num_envs, dtype=jnp.int32)
+            mains = storage.mains.astype(jnp.int32)
+            indices = jnp.argsort(T[:, None] - mains * num_steps, axis=0)
+            switch_steps = jnp.sum(mains, axis=0)
+            switch = T[:, None] == (switch_steps[None, :] - 1)
+            storage = jax.tree.map(lambda x: x[indices, B[None, :]], storage)
 
         loss_grad_fn = jax.value_and_grad(loss_fn, has_aux=True)
 
@@ -723,7 +754,10 @@ if __name__ == "__main__":
 
             next_value = create_agent(args).apply(
                 agent_state.params, next_inputs)[2].squeeze(-1)
-            next_value = jnp.where(next_main, -next_value, next_value)
+            if args.switch:
+                next_value = jnp.where(next_main, -next_value, next_value)
+            else:
+                next_value = jnp.where(next_main, next_value, -next_value)
 
             def convert_data(x: jnp.ndarray, num_steps):
                 if args.update_epochs > 1:
@@ -740,8 +774,12 @@ if __name__ == "__main__":
             shuffled_init_rstate1, shuffled_init_rstate2, \
                 shuffled_next_value = jax.tree.map(
                 partial(convert_data, num_steps=1), (init_rstate1, init_rstate2, next_value))
-            shuffled_storage, shuffled_switch = jax.tree.map(
-                partial(convert_data, num_steps=num_steps), (storage, switch))
+            shuffled_storage = jax.tree.map(
+                partial(convert_data, num_steps=num_steps), storage)
+            if args.switch:
+                switch_or_mains = convert_data(switch, num_steps)
+            else:
+                switch_or_mains = shuffled_storage.mains
             shuffled_mask = jnp.ones_like(shuffled_storage.mains)
 
             def update_minibatch(agent_state, minibatch):
@@ -760,7 +798,7 @@ if __name__ == "__main__":
                     shuffled_storage.obs,
                     shuffled_storage.dones,
                     shuffled_storage.next_dones,
-                    shuffled_switch,
+                    switch_or_mains,
                     shuffled_storage.actions,
                     shuffled_storage.logits,
                     shuffled_storage.rewards,
