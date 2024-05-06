@@ -897,7 +897,7 @@ if __name__ == "__main__":
             writer.add_scalar("losses/loss", loss, global_step)
 
         if args.local_rank == 0 and learner_policy_version % args.save_interval == 0 and not args.debug:
-            M_steps = args.batch_size * learner_policy_version // (2**20)
+            M_steps = args.batch_size * learner_policy_version // 1e6
             ckpt_name = f"{timestamp}_{M_steps}M.flax_model"
             ckpt_maneger.save(unreplicated_params, ckpt_name)
             if args.gcs_bucket is not None:
