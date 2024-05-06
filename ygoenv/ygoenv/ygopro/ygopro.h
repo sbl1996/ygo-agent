@@ -3865,14 +3865,14 @@ private:
       }
 
       // TODO: use this when added to history actions
-      if ((min == max) && (max == specs.size())) {
-        resp_buf_[0] = specs.size();
-        for (int i = 0; i < specs.size(); ++i) {
-          resp_buf_[i + 1] = i;
-        }
-        YGO_SetResponseb(pduel_, resp_buf_);
-        return;
-      }
+      // if ((min == max) && (max == specs.size())) {
+      //   resp_buf_[0] = specs.size();
+      //   for (int i = 0; i < specs.size(); ++i) {
+      //     resp_buf_[i + 1] = i;
+      //   }
+      //   YGO_SetResponseb(pduel_, resp_buf_);
+      //   return;
+      // }
 
       init_multi_select(min, max, 0, specs);
 
@@ -3946,15 +3946,15 @@ private:
       }
 
       // TODO: use this when added to history actions
-      if (max == specs.size()) {
-        // tribute all
-        resp_buf_[0] = specs.size();
-        for (int i = 0; i < specs.size(); ++i) {
-          resp_buf_[i + 1] = i;
-        }
-        YGO_SetResponseb(pduel_, resp_buf_);
-        return;
-      }
+      // if (max == specs.size()) {
+      //   // tribute all
+      //   resp_buf_[0] = specs.size();
+      //   for (int i = 0; i < specs.size(); ++i) {
+      //     resp_buf_[i + 1] = i;
+      //   }
+      //   YGO_SetResponseb(pduel_, resp_buf_);
+      //   return;
+      // }
 
       init_multi_select(min, max, 0, specs);
 
