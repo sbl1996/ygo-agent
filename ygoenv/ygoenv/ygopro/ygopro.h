@@ -2085,11 +2085,15 @@ private:
       f_cards(offset, 5) = position_to_id(POS_FACEUP);
       f_cards(offset, 6) = 1;
     } else {
-      f_cards(offset, 5) = position_to_id(c.position_);
-      if (hide && (location == LOCATION_DECK || location == LOCATION_HAND ||
-                   location == LOCATION_EXTRA)) {
-        f_cards(offset, 5) = position_to_id(POS_FACEDOWN);
-        // fmt::println("location: {}, position: {}\n", location2str.at(location), position_to_string(c.position_));
+      if (location == LOCATION_DECK || location == LOCATION_HAND || location == LOCATION_EXTRA) {
+        if (hide || (c.position_ & POS_FACEDOWN)) {
+          f_cards(offset, 5) = position_to_id(POS_FACEDOWN);
+        }
+        // else {
+        //   fmt::println("location: {}, position: {}", location2str.at(location), position_to_string(c.position_));
+        // }
+      } else {
+        f_cards(offset, 5) = position_to_id(c.position_);
       }
     }
     if (!hide) {
