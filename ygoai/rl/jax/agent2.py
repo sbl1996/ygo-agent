@@ -151,6 +151,7 @@ class Encoder(nn.Module):
     dtype: Optional[jnp.dtype] = None
     param_dtype: jnp.dtype = jnp.float32
     freeze_id: bool = False
+    use_history: bool = True
 
     @nn.compact
     def __call__(self, x):
@@ -266,6 +267,8 @@ class Encoder(nn.Module):
         f_g_actions = f_g_actions / a_mask_.sum(axis=1, keepdims=True)
 
         # State
+        if not self.use_history:
+            f_g_h_actions = jnp.zeros_like(f_g_h_actions)
         f_state = jnp.concatenate([f_g_card, f_global, f_g_h_actions, f_g_actions], axis=-1)
         f_state = MLP((c * 2, c), dtype=self.dtype, param_dtype=self.param_dtype)(f_state)
         f_state = layer_norm(dtype=self.dtype)(f_state)
@@ -306,35 +309,7 @@ class Critic(nn.Module):
         return x
 
 
-class PPOAgent(nn.Module):
-    channels: int = 128
-    num_layers: int = 2
-    embedding_shape: Optional[Union[int, Tuple[int, int]]] = None
-    dtype: jnp.dtype = jnp.float32
-    param_dtype: jnp.dtype = jnp.float32
-    
-    @nn.compact
-    def __call__(self, x):
-        c = self.channels
-        encoder = Encoder(
-            channels=c,
-            num_layers=self.num_layers,
-            embedding_shape=self.embedding_shape,
-            dtype=self.dtype,
-            param_dtype=self.param_dtype,
-        )
-        actor = Actor(
-            channels=c, dtype=jnp.float32, param_dtype=self.param_dtype)
-        critic = Critic(
-            channels=[c, c, c], dtype=self.dtype, param_dtype=self.param_dtype)
-
-        f_actions, f_state, mask, valid = encoder(x)
-        logits = actor(f_state, f_actions, mask)
-        value = critic(f_state)
-        return logits, value, valid
-
-
-class PPOLSTMAgent(nn.Module):
+class LSTMAgent(nn.Module):
     channels: int = 128
     num_layers: int = 2
     lstm_channels: int = 512
@@ -344,6 +319,7 @@ class PPOLSTMAgent(nn.Module):
     multi_step: bool = False
     switch: bool = True
     freeze_id: bool = False
+    use_history: bool = True
 
     @nn.compact
     def __call__(self, inputs):
@@ -363,6 +339,7 @@ class PPOLSTMAgent(nn.Module):
             dtype=self.dtype,
             param_dtype=self.param_dtype,
             freeze_id=self.freeze_id,
+            use_history=self.use_history,
         )
 
         f_actions, f_state, mask, valid = encoder(x)
