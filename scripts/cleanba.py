@@ -130,6 +130,9 @@ class Args:
     logits_threshold: Optional[float] = None
     """the logits threshold for NeuRD and ACH, typically 2.0-6.0"""
 
+    vloss_clip: Optional[float] = None
+    """the value loss clipping coefficient"""
+
     ent_coef: float = 0.01
     """coefficient of the entropy"""
     vf_coef: float = 1.0
@@ -717,6 +720,9 @@ if __name__ == "__main__":
         pg_loss = pg_loss / n_valids
         v_loss = v_loss / n_valids
         ent_loss = ent_loss / n_valids
+
+        if args.vloss_clip is not None:
+            v_loss = jnp.minimum(v_loss, args.vloss_clip)
 
         loss = pg_loss - args.ent_coef * ent_loss + v_loss * args.vf_coef
         return loss, (pg_loss, v_loss, ent_loss, jax.lax.stop_gradient(approx_kl))

@@ -582,7 +582,7 @@ static const ankerl::unordered_dense::map<uint8_t, uint8_t> location2id =
 DEFINE_X_TO_ID_FUN(location_to_id, location2id)
 
 
-#define POS_NONE 0x0 // xyz materials (overlay)
+#define POS_NONE 0x0 // xyz materials (overlay) ???
 
 static const std::map<uint8_t, std::string> position2str = {
     {POS_NONE, "none"},
@@ -646,7 +646,7 @@ static const std::map<uint32_t, std::string> race2str = {
     {RACE_CREATORGOD, "Creator God"},
     {RACE_WYRM, "Wyrm"},
     {RACE_CYBERSE, "Cyberse"},
-    {RACE_ILLUSION, "Illusion'"}};
+    {RACE_ILLUSION, "Illusion"}};
 
 static const ankerl::unordered_dense::map<uint32_t, uint8_t> race2id =
     make_ids(race2str);
@@ -2086,6 +2086,11 @@ private:
       f_cards(offset, 6) = 1;
     } else {
       f_cards(offset, 5) = position_to_id(c.position_);
+      if (hide && (location == LOCATION_DECK || location == LOCATION_HAND ||
+                   location == LOCATION_EXTRA)) {
+        f_cards(offset, 5) = position_to_id(POS_FACEDOWN);
+        // fmt::println("location: {}, position: {}\n", location2str.at(location), position_to_string(c.position_));
+      }
     }
     if (!hide) {
       f_cards(offset, 7) = attribute_to_id(c.attribute_);
