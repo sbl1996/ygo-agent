@@ -1837,9 +1837,13 @@ public:
       } else {
         // TODO: find the root cause
         fmt::println("options: {}, idx: {}, option: {}", options_, idx, option);
-        if (std::find(options_.begin(), options_.end(), "f") != options_.end()) {
-          finish = true;
+        ms_idx_ = -1;
+        resp_buf_[0] = ms_min_;
+        for (int i = 0; i < ms_min_; ++i) {
+          resp_buf_[i + 1] = i;
         }
+        YGO_SetResponseb(pduel_, resp_buf_);
+        return;
       }
     }
     if (finish) {
