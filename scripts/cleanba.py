@@ -252,7 +252,7 @@ def rollout(
     if eval_mode != 'bot':
         eval_params = params_queue.get()
 
-    local_seed = args.seed + device_thread_id
+    local_seed = args.seed + device_thread_id * 100
     np.random.seed(local_seed)
 
     envs = make_env(
@@ -266,7 +266,7 @@ def rollout(
 
     eval_envs = make_env(
         args,
-        local_seed,
+        local_seed + 10000,
         args.local_eval_episodes,
         args.local_eval_episodes // 4, mode=eval_mode, eval=True)
     eval_envs = RecordEpisodeStatistics(eval_envs)
@@ -573,7 +573,7 @@ if __name__ == "__main__":
         args.ckpt_dir, save_fn, n_saved=2)
 
     # seeding
-    seed_offset = args.local_rank * 10000
+    seed_offset = args.local_rank * 1000
     args.seed += seed_offset
     random.seed(args.seed)
     init_key = jax.random.PRNGKey(args.seed - seed_offset)
