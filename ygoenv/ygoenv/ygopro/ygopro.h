@@ -1785,6 +1785,11 @@ public:
   void _callback_multi_select_2(int idx) {
     const auto &option = options_[idx];
     idx = get_ms_spec_idx(option);
+    if (idx == -1) {
+      // TODO: find the root cause
+      fmt::println("options: {}, idx: {}, option: {}", options_, idx, option);
+      throw std::runtime_error("Spec not found");
+    }
     ms_r_idxs_.push_back(idx);
     std::vector<std::vector<int>> combs;
     for (auto &c : ms_combs_) {
@@ -4319,6 +4324,7 @@ private:
         }
       };
     } else if (msg_ == MSG_SELECT_OPTION) {
+      // TODO: add card information
       auto player = read_u8();
       auto size = read_u8();
       if (verbose_) {
