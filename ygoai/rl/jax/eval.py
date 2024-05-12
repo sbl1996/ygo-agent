@@ -36,7 +36,7 @@ def evaluate(envs, num_episodes, predict_fn, rnn_state=None):
     return eval_return, eval_ep_len, eval_win_rate
 
 
-def battle(envs, num_episodes, predict_fn, init_rnn_state=None):
+def battle(envs, num_episodes, predict_fn, rstate1=None, rstate2=None):
     num_envs = envs.num_envs
     episode_rewards = []
     episode_lengths = []
@@ -50,7 +50,6 @@ def battle(envs, num_episodes, predict_fn, init_rnn_state=None):
         np.zeros(num_envs // 2, dtype=np.int64),
         np.ones(num_envs - num_envs // 2, dtype=np.int64)
     ])
-    rstate1 = rstate2 = init_rnn_state
 
     while True:
         main = next_to_play == main_player

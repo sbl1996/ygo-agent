@@ -63,6 +63,8 @@ class Args:
     """the number of channels for the agent"""
     rnn_channels: Optional[int] = 512
     """the number of rnn channels for the agent"""
+    rnn_type: Optional[str] = "lstm"
+    """the type of RNN to use for agent, None for no RNN"""
 
     checkpoint: Optional[str] = None
     """the checkpoint to load, must be a `flax_model` file"""
@@ -75,18 +77,12 @@ class Args:
 
 
 def create_agent(args):
-    return PPOLSTMAgent(
+    return RNNAgent(
         channels=args.num_channels,
         num_layers=args.num_layers,
-        lstm_channels=args.rnn_channels,
+        rnn_channels=args.rnn_channels,
         embedding_shape=args.num_embeddings,
-    )
-
-
-def init_rnn_state(num_envs, rnn_channels):
-    return (
-        np.zeros((num_envs, rnn_channels)),
-        np.zeros((num_envs, rnn_channels)),
+        rnn_type=args.rnn_type,
     )
 
 
@@ -139,7 +135,7 @@ if __name__ == "__main__":
         import jax
         import jax.numpy as jnp
         import flax
-        from ygoai.rl.jax.agent2 import PPOLSTMAgent
+        from ygoai.rl.jax.agent2 import RNNAgent
         from jax.experimental.compilation_cache import compilation_cache as cc
         cc.set_cache_dir(os.path.expanduser("~/.cache/jax"))
 
@@ -148,7 +144,7 @@ if __name__ == "__main__":
         key, agent_key = jax.random.split(key, 2)
         sample_obs = jax.tree.map(lambda x: jnp.array([x]), obs_space.sample())
 
-        rstate = init_rnn_state(1, args.rnn_channels)
+        rstate = agent.init_rnn_state(1)
         params = jax.jit(agent.init)(agent_key, (rstate, sample_obs))
 
         with open(args.checkpoint, "rb") as f:
@@ -158,7 +154,7 @@ if __name__ == "__main__":
 
         @jax.jit
         def get_probs_and_value(params, rstate, obs, done):
-            agent = create_agent(args)
+            agent = agent
             next_rstate, logits, value = agent.apply(params, (rstate, obs))[:3]
             probs = jax.nn.softmax(logits, axis=-1)
             next_rstate = jax.tree.map(
@@ -173,6 +169,7 @@ if __name__ == "__main__":
 
 
     obs, infos = envs.reset()
+    print(obs)
     next_to_play = infos['to_play']
     dones = np.zeros(num_envs, dtype=np.bool_)
 

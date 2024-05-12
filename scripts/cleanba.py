@@ -25,7 +25,7 @@ from tensorboardX import SummaryWriter
 
 from ygoai.utils import init_ygopro, load_embeddings
 from ygoai.rl.ckpt import ModelCheckpoint, sync_to_gcs, zip_files
-from ygoai.rl.jax.agent2 import LSTMAgent
+from ygoai.rl.jax.agent2 import RNNAgent
 from ygoai.rl.jax.utils import RecordEpisodeStatistics, masked_normalize, categorical_sample
 from ygoai.rl.jax.eval import evaluate, battle
 from ygoai.rl.jax import clipped_surrogate_pg_loss, vtrace_2p0s, mse_loss, entropy_loss, simple_policy_loss, ach_loss, policy_gradient_loss
@@ -80,8 +80,6 @@ class Args:
     """whether to use history actions as input for agent"""
     eval_use_history: bool = True
     """whether to use history actions as input for eval agent"""
-    use_rnn: bool = True
-    """whether to use RNN for the agent"""
 
     total_timesteps: int = 50000000000
     """total timesteps of the experiments"""
@@ -150,6 +148,10 @@ class Args:
     """the number of channels for the agent"""
     rnn_channels: int = 512
     """the number of channels for the RNN in the agent"""
+    rnn_type: Optional[str] = "lstm"
+    """the type of RNN to use, None for no RNN"""
+    eval_rnn_type: Optional[str] = "lstm"
+    """the type of RNN to use for evaluation, None for no RNN"""
 
     actor_device_ids: List[int] = field(default_factory=lambda: [0, 1])
     """the device ids that actor workers will use"""
@@ -222,18 +224,18 @@ class Transition(NamedTuple):
 
 
 def create_agent(args, multi_step=False, eval=False):
-    return LSTMAgent(
+    return RNNAgent(
         channels=args.num_channels,
         num_layers=args.num_layers,
         embedding_shape=args.num_embeddings,
         dtype=jnp.bfloat16 if args.bfloat16 else jnp.float32,
         param_dtype=jnp.float32,
-        lstm_channels=args.rnn_channels,
+        rnn_channels=args.rnn_channels,
         switch=args.switch,
         multi_step=multi_step,
         freeze_id=args.freeze_id,
         use_history=args.use_history if not eval else args.eval_use_history,
-        no_rnn=(not args.use_rnn) if not eval else False
+        rnn_type=args.rnn_type if not eval else args.eval_rnn_type,
     )
 
 
@@ -284,23 +286,20 @@ def rollout(
     other_time = 0
     avg_ep_returns = deque(maxlen=1000)
     avg_win_rates = deque(maxlen=1000)
-
-    @partial(jax.jit, static_argnums=(2,))
-    def get_logits(
-        params: flax.core.FrozenDict, inputs, eval=False):
-        rstate, logits = create_agent(args, eval=eval).apply(params, inputs)[:2]
-        return rstate, logits
+    
+    agent = create_agent(args)
+    eval_agent = create_agent(args, eval=True)
 
     @jax.jit
     def get_action(
         params: flax.core.FrozenDict, inputs):
-        rstate, logits = get_logits(params, inputs)
+        rstate, logits = eval_agent.apply(params, inputs)[:2]
         return rstate, logits.argmax(axis=1)
 
     @jax.jit
     def get_action_battle(params1, params2, rstate1, rstate2, obs, main, done):
-        next_rstate1, logits1 = get_logits(params1, (rstate1, obs))
-        next_rstate2, logits2 = get_logits(params2, (rstate2, obs), True)
+        next_rstate1, logits1 = agent.apply(params1, (rstate1, obs))[:2]
+        next_rstate2, logits2 = eval_agent.apply(params2, (rstate2, obs))[:2]
         logits = jnp.where(main[:, None], logits1, logits2)
         rstate1 = jax.tree.map(
             lambda x1, x2: jnp.where(main[:, None], x1, x2), next_rstate1, rstate1)
@@ -320,7 +319,7 @@ def rollout(
 
         rstate = jax.tree.map(
             lambda x1, x2: jnp.where(main[:, None], x1, x2), rstate1, rstate2)
-        rstate, logits = get_logits(params, (rstate, next_obs))
+        rstate, logits = agent.apply(params, (rstate, next_obs))[:2]
         rstate1 = jax.tree.map(lambda x1, x2: jnp.where(main[:, None], x1, x2), rstate, rstate1)
         rstate2 = jax.tree.map(lambda x1, x2: jnp.where(main[:, None], x2, x1), rstate, rstate2)
         rstate1, rstate2 = jax.tree.map(
@@ -335,10 +334,11 @@ def rollout(
     next_obs, info = envs.reset()
     next_to_play = info["to_play"]
     next_done = np.zeros(args.local_num_envs, dtype=np.bool_)
-    next_rstate1 = next_rstate2 = init_rnn_state(
-        args.local_num_envs, args.rnn_channels)
-    eval_rstate = init_rnn_state(
-        args.local_eval_episodes, args.rnn_channels)
+    next_rstate1 = next_rstate2 = agent.init_rnn_state(args.local_num_envs)
+
+    eval_rstate1 = agent.init_rnn_state(args.local_eval_episodes)
+    eval_rstate2 = eval_agent.init_rnn_state(args.local_eval_episodes)
+
     main_player = np.concatenate([
         np.zeros(args.local_num_envs // 2, dtype=np.int64),
         np.ones(args.local_num_envs // 2, dtype=np.int64)
@@ -452,11 +452,11 @@ def rollout(
             if eval_mode == 'bot':
                 predict_fn = lambda x: get_action(params, x)
                 eval_return, eval_ep_len, eval_win_rate = evaluate(
-                    eval_envs, args.local_eval_episodes, predict_fn, eval_rstate)
+                    eval_envs, args.local_eval_episodes, predict_fn, eval_rstate2)
             else:
                 predict_fn = lambda *x: get_action_battle(params, eval_params, *x)
                 eval_return, eval_ep_len, eval_win_rate = battle(
-                    eval_envs, args.local_eval_episodes, predict_fn, eval_rstate)
+                    eval_envs, args.local_eval_episodes, predict_fn, eval_rstate1, eval_rstate2)
             eval_time = time.time() - _start
             other_time += eval_time
             eval_stats = np.array([eval_time, eval_return, eval_win_rate], dtype=np.float32)
@@ -606,8 +606,9 @@ if __name__ == "__main__":
         frac = 1.0 - (count // (args.num_minibatches * args.update_epochs)) / args.num_updates
         return args.learning_rate * frac
 
-    rstate = init_rnn_state(1, args.rnn_channels)
+    # rstate = init_rnn_state(1, args.rnn_channels)
     agent = create_agent(args)
+    rstate = agent.init_rnn_state(1)
     params = agent.init(init_key, (rstate, sample_obs))
     if embeddings is not None:
         unknown_embed = embeddings.mean(axis=0)
@@ -641,19 +642,14 @@ if __name__ == "__main__":
     # print(agent.tabulate(agent_key, sample_obs))
 
     if args.eval_checkpoint:
+        eval_agent = create_agent(args, eval=True)
+        eval_rstate = eval_agent.init_rnn_state(1)
+        eval_params = eval_agent.init(init_key, (eval_rstate, sample_obs))
         with open(args.eval_checkpoint, "rb") as f:
-            eval_params = flax.serialization.from_bytes(params, f.read())
+            eval_params = flax.serialization.from_bytes(eval_params, f.read())
         print(f"loaded eval checkpoint from {args.eval_checkpoint}")
     else:
         eval_params = None
-
-    @jax.jit
-    def get_logits_and_value(
-        params: flax.core.FrozenDict, inputs,
-    ):
-        rstate, logits, value, valid = create_agent(
-            args, multi_step=True).apply(params, inputs)
-        return logits, value.squeeze(-1)
 
     def loss_fn(
         params, rstate1, rstate2, obs, dones, next_dones,
@@ -671,7 +667,9 @@ if __name__ == "__main__":
             dones = dones | next_dones
 
         inputs = (rstate1, rstate2, obs, dones, switch_or_mains)
-        new_logits, new_values = get_logits_and_value(params, inputs)
+        _rstate, new_logits, new_values, _valid = create_agent(
+            args, multi_step=True).apply(params, inputs)
+        new_values = new_values.squeeze(-1)
 
         ratios = distrax.importance_sampling_ratios(distrax.Categorical(
             new_logits), distrax.Categorical(logits), actions)

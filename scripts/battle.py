@@ -2,9 +2,10 @@ import sys
 import time
 import os
 import random
-from typing import Optional, Literal
+from typing import Optional
 from dataclasses import dataclass
 from tqdm import tqdm
+from functools import partial
 
 import ygoenv
 import numpy as np
@@ -17,7 +18,7 @@ import flax
 
 from ygoai.utils import init_ygopro
 from ygoai.rl.utils import RecordEpisodeStatistics
-from ygoai.rl.jax.agent2 import PPOLSTMAgent
+from ygoai.rl.jax.agent2 import RNNAgent
 
 
 @dataclass
@@ -43,6 +44,10 @@ class Args:
     """the number of history actions to use"""
     num_embeddings: Optional[int] = None
     """the number of embeddings of the agent"""
+    use_history1: bool = True
+    """whether to use history actions as input for agent1"""
+    use_history2: bool = True
+    """whether to use history actions as input for agent2"""
 
     verbose: bool = False
     """whether to print debug information"""
@@ -60,6 +65,10 @@ class Args:
     """the number of channels for the agent"""
     rnn_channels: Optional[int] = 512
     """the number of rnn channels for the agent"""
+    rnn_type1: Optional[str] = "lstm"
+    """the type of RNN to use for agent1, None for no RNN"""
+    rnn_type2: Optional[str] = "lstm"
+    """the type of RNN to use for agent2, None for no RNN"""
     checkpoint1: str = "checkpoints/agent.pt"
     """the checkpoint to load for the first agent, must be a `flax_model` file"""
     checkpoint2: str = "checkpoints/agent.pt"
@@ -72,19 +81,25 @@ class Args:
     """the number of threads to use for envpool, defaults to `num_envs`"""
 
 
-def create_agent(args):
-    return PPOLSTMAgent(
+def create_agent1(args):
+    return RNNAgent(
         channels=args.num_channels,
         num_layers=args.num_layers,
-        lstm_channels=args.rnn_channels,
+        rnn_channels=args.rnn_channels,
         embedding_shape=args.num_embeddings,
+        use_history=args.use_history1,
+        rnn_type=args.rnn_type1,
     )
 
 
-def init_rnn_state(num_envs, rnn_channels):
-    return (
-        np.zeros((num_envs, rnn_channels)),
-        np.zeros((num_envs, rnn_channels)),
+def create_agent2(args):
+    return RNNAgent(
+        channels=args.num_channels,
+        num_layers=args.num_layers,
+        rnn_channels=args.rnn_channels,
+        embedding_shape=args.num_embeddings,
+        use_history=args.use_history2,
+        rnn_type=args.rnn_type2,
     )
 
 
@@ -137,28 +152,34 @@ if __name__ == "__main__":
     envs.num_envs = num_envs
     envs = RecordEpisodeStatistics(envs)
 
-    agent = create_agent(args)
     key = jax.random.PRNGKey(args.seed)
     key, agent_key = jax.random.split(key, 2)
     sample_obs = jax.tree.map(lambda x: jnp.array([x]), obs_space.sample())
 
-    rstate = init_rnn_state(1, args.rnn_channels)
-    params = jax.jit(agent.init)(agent_key, (rstate, sample_obs))
+    agent1 = create_agent1(args)
+    rstate = agent1.init_rnn_state(1)
+    params1 = jax.jit(agent1.init)(agent_key, (rstate, sample_obs))
 
     with open(args.checkpoint1, "rb") as f:
-        params1 = flax.serialization.from_bytes(params, f.read())
+        params1 = flax.serialization.from_bytes(params1, f.read())
     if args.checkpoint1 == args.checkpoint2:
         params2 = params1
     else:
+        agent2 = create_agent2(args)
+        rstate = agent2.init_rnn_state(1)
+        params2 = jax.jit(agent2.init)(agent_key, (rstate, sample_obs))
         with open(args.checkpoint2, "rb") as f:
-            params2 = flax.serialization.from_bytes(params, f.read())
+            params2 = flax.serialization.from_bytes(params2, f.read())
     
     params1 = jax.device_put(params1)
     params2 = jax.device_put(params2)
     
-    @jax.jit
-    def get_probs(params, rstate, obs, done=None):
-        agent = create_agent(args)
+    @partial(jax.jit, static_argnums=(4,))
+    def get_probs(params, rstate, obs, done=None, model_id=1):
+        if model_id == 1:
+            agent = create_agent1(args)
+        else:
+            agent = create_agent2(args)
         next_rstate, logits = agent.apply(params, (rstate, obs))[:2]
         probs = jax.nn.softmax(logits, axis=-1)
         if done is not None:
@@ -168,8 +189,8 @@ if __name__ == "__main__":
     if args.num_envs != 1:
         @jax.jit
         def get_probs2(params1, params2, rstate1, rstate2, obs, main, done):
-            next_rstate1, probs1 = get_probs(params1, rstate1, obs)
-            next_rstate2, probs2 = get_probs(params2, rstate2, obs)
+            next_rstate1, probs1 = get_probs(params1, rstate1, obs, None, 1)
+            next_rstate2, probs2 = get_probs(params2, rstate2, obs, None, 2)
             probs = jnp.where(main[:, None], probs1, probs2)
             rstate1 = jax.tree.map(
                 lambda x1, x2: jnp.where(main[:, None], x1, x2), next_rstate1, rstate1)
@@ -185,9 +206,9 @@ if __name__ == "__main__":
     else:
         def predict_fn(rstate1, rstate2, obs, main, done):
             if main[0]:
-                rstate1, probs = get_probs(params1, rstate1, obs, done)
+                rstate1, probs = get_probs(params1, rstate1, obs, done, 1)
             else:
-                rstate2, probs = get_probs(params2, rstate2, obs, done)
+                rstate2, probs = get_probs(params2, rstate2, obs, done, 2)
             return rstate1, rstate2, np.array(probs)
 
     obs, infos = envs.reset()
@@ -209,7 +230,8 @@ if __name__ == "__main__":
         np.zeros(num_envs // 2, dtype=np.int64),
         np.ones(num_envs - num_envs // 2, dtype=np.int64)
     ])
-    rstate1 = rstate2 = init_rnn_state(num_envs, args.rnn_channels)
+    rstate1 = agent1.init_rnn_state(num_envs)
+    rstate2 = agent2.init_rnn_state(num_envs)
 
     if not args.verbose:
         pbar = tqdm(total=args.num_episodes)

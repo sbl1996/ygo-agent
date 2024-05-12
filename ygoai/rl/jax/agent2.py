@@ -1,6 +1,7 @@
 from typing import Tuple, Union, Optional, Sequence
 from functools import partial
 
+import numpy as np
 import jax
 import jax.numpy as jnp
 import flax.linen as nn
@@ -272,8 +273,6 @@ class Encoder(nn.Module):
         f_state = jnp.concatenate([f_g_card, f_global, f_g_h_actions, f_g_actions], axis=-1)
         f_state = MLP((c * 2, c), dtype=self.dtype, param_dtype=self.param_dtype)(f_state)
         f_state = layer_norm(dtype=self.dtype)(f_state)
-        
-        # TODO: LSTM
         return f_actions, f_state, a_mask, valid
 
 
@@ -309,10 +308,34 @@ class Critic(nn.Module):
         return x
 
 
-class LSTMAgent(nn.Module):
+def rnn_forward_2p(rnn_layer, rstate1, rstate2, f_state, done, switch_or_main, switch=True):
+    if switch:
+        def body_fn(cell, carry, x, done, switch):
+            rstate, init_rstate2 = carry
+            rstate, y = cell(rstate, x)
+            rstate = jax.tree.map(lambda x: jnp.where(done[:, None], 0, x), rstate)
+            rstate = jax.tree.map(lambda x, y: jnp.where(switch[:, None], x, y), init_rstate2, rstate)
+            return (rstate, init_rstate2), y
+    else:
+        def body_fn(cell, carry, x, done, main):
+            rstate1, rstate2 = carry
+            rstate = jax.tree.map(lambda x1, x2: jnp.where(main[:, None], x1, x2), rstate1, rstate2)
+            rstate, y = cell(rstate, x)
+            rstate1 = jax.tree.map(lambda x, y: jnp.where(main[:, None], x, y), rstate, rstate1)
+            rstate2 = jax.tree.map(lambda x, y: jnp.where(main[:, None], y, x), rstate, rstate2)
+            rstate1, rstate2 = jax.tree.map(lambda x: jnp.where(done[:, None], 0, x), (rstate1, rstate2))
+            return (rstate1, rstate2), y
+    scan = nn.scan(
+        body_fn, variable_broadcast='params',
+        split_rngs={'params': False})
+    rstate, f_state = scan(rnn_layer, (rstate1, rstate2), f_state, done, switch_or_main)
+    return rstate, f_state
+
+
+class RNNAgent(nn.Module):
     channels: int = 128
     num_layers: int = 2
-    lstm_channels: int = 512
+    rnn_channels: int = 512
     embedding_shape: Optional[Union[int, Tuple[int, int]]] = None
     dtype: jnp.dtype = jnp.float32
     param_dtype: jnp.dtype = jnp.float32
@@ -320,15 +343,13 @@ class LSTMAgent(nn.Module):
     switch: bool = True
     freeze_id: bool = False
     use_history: bool = True
-    no_rnn: bool = False
+    rnn_type: str = 'lstm'
 
     @nn.compact
     def __call__(self, inputs):
         if self.multi_step:
             # (num_steps * batch_size, ...)
-            rstate1, rstate2, x, done, switch_or_main = inputs
-            batch_size = rstate1[0].shape[0]
-            num_steps = done.shape[0] // batch_size
+            *rstate, x, done, switch_or_main = inputs
         else:
             rstate, x = inputs
 
@@ -345,43 +366,48 @@ class LSTMAgent(nn.Module):
 
         f_actions, f_state, mask, valid = encoder(x)
 
-        lstm_layer = nn.OptimizedLSTMCell(
-            self.lstm_channels, dtype=self.dtype, param_dtype=self.param_dtype, kernel_init=nn.initializers.orthogonal(1.0))
-        if self.multi_step:
-            if self.switch:
-                def body_fn(cell, carry, x, done, switch):
-                    rstate, init_rstate2 = carry
-                    rstate, y = cell(rstate, x)
-                    rstate = jax.tree.map(lambda x: jnp.where(done[:, None], 0, x), rstate)
-                    rstate = jax.tree.map(lambda x, y: jnp.where(switch[:, None], x, y), init_rstate2, rstate)
-                    return (rstate, init_rstate2), y
-            else:
-                def body_fn(cell, carry, x, done, main):
-                    rstate1, rstate2 = carry
-                    rstate = jax.tree.map(lambda x1, x2: jnp.where(main[:, None], x1, x2), rstate1, rstate2)
-                    rstate, y = cell(rstate, x)
-                    rstate1 = jax.tree.map(lambda x, y: jnp.where(main[:, None], x, y), rstate, rstate1)
-                    rstate2 = jax.tree.map(lambda x, y: jnp.where(main[:, None], y, x), rstate, rstate2)
-                    rstate1, rstate2 = jax.tree.map(lambda x: jnp.where(done[:, None], 0, x), (rstate1, rstate2))
-                    return (rstate1, rstate2), y
-            scan = nn.scan(
-                body_fn, variable_broadcast='params',
-                split_rngs={'params': False})
-            f_state_r, done, switch_or_main = jax.tree.map(
-                lambda x: jnp.reshape(x, (num_steps, batch_size) + x.shape[1:]), (f_state, done, switch_or_main))
-            rstate, f_state_r = scan(lstm_layer, (rstate1, rstate2), f_state_r, done, switch_or_main)
-            f_state_r = f_state_r.reshape((-1, f_state_r.shape[-1]))
+        if self.rnn_type in ['lstm', 'none']:
+            rnn_layer = nn.OptimizedLSTMCell(
+                self.rnn_channels, dtype=self.dtype, param_dtype=self.param_dtype, kernel_init=nn.initializers.orthogonal(1.0))
+        elif self.rnn_type == 'gru':
+            rnn_layer = nn.GRUCell(
+                self.rnn_channels, dtype=self.dtype, param_dtype=self.param_dtype, kernel_init=nn.initializers.orthogonal(1.0))
+        elif self.rnn_type is None:
+            rnn_layer = None
+
+        if rnn_layer is None:
+            f_state_r = f_state
+        elif self.rnn_type == 'none':
+            f_state_r = jnp.concatenate([f_state for i in range(self.rnn_channels // c)], axis=-1)
         else:
-            rstate, f_state_r = lstm_layer(rstate, f_state)
+            if self.multi_step:
+                rstate1, rstate2 = rstate
+                batch_size = jax.tree.leaves(rstate1)[0].shape[0]
+                num_steps = done.shape[0] // batch_size
+                f_state_r, done, switch_or_main = jax.tree.map(
+                    lambda x: jnp.reshape(x, (num_steps, batch_size) + x.shape[1:]), (f_state, done, switch_or_main))
+                rstate, f_state_r = rnn_forward_2p(
+                    rnn_layer, rstate1, rstate2, f_state_r, done, switch_or_main, self.switch)
+                f_state_r = f_state_r.reshape((-1, f_state_r.shape[-1]))
+            else:
+                rstate, f_state_r = rnn_layer(rstate, f_state)
 
         actor = Actor(
             channels=c, dtype=jnp.float32, param_dtype=self.param_dtype)
         critic = Critic(
             channels=[c, c, c], dtype=self.dtype, param_dtype=self.param_dtype)
-
-        if self.no_rnn:
-            f_state_r = jnp.concatenate([f_state for i in range(self.lstm_channels // c)], axis=-1)
-
+        
         logits = actor(f_state_r, f_actions, mask)
         value = critic(f_state_r)
         return rstate, logits, value, valid
+
+    def init_rnn_state(self, batch_size):
+        if self.rnn_type in ['lstm', 'none']:
+            return (
+                np.zeros((batch_size, self.rnn_channels)),
+                np.zeros((batch_size, self.rnn_channels)),
+            )
+        elif self.rnn_type == 'gru':
+            return np.zeros((batch_size, self.rnn_channels))
+        else:
+            return None
