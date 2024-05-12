@@ -320,6 +320,7 @@ class LSTMAgent(nn.Module):
     switch: bool = True
     freeze_id: bool = False
     use_history: bool = True
+    no_rnn: bool = False
 
     @nn.compact
     def __call__(self, inputs):
@@ -366,18 +367,21 @@ class LSTMAgent(nn.Module):
             scan = nn.scan(
                 body_fn, variable_broadcast='params',
                 split_rngs={'params': False})
-            f_state, done, switch_or_main = jax.tree.map(
+            f_state_r, done, switch_or_main = jax.tree.map(
                 lambda x: jnp.reshape(x, (num_steps, batch_size) + x.shape[1:]), (f_state, done, switch_or_main))
-            rstate, f_state = scan(lstm_layer, (rstate1, rstate2), f_state, done, switch_or_main)
-            f_state = f_state.reshape((-1, f_state.shape[-1]))
+            rstate, f_state_r = scan(lstm_layer, (rstate1, rstate2), f_state_r, done, switch_or_main)
+            f_state_r = f_state_r.reshape((-1, f_state_r.shape[-1]))
         else:
-            rstate, f_state = lstm_layer(rstate, f_state)
+            rstate, f_state_r = lstm_layer(rstate, f_state)
 
         actor = Actor(
             channels=c, dtype=jnp.float32, param_dtype=self.param_dtype)
         critic = Critic(
             channels=[c, c, c], dtype=self.dtype, param_dtype=self.param_dtype)
 
-        logits = actor(f_state, f_actions, mask)
-        value = critic(f_state)
+        if self.no_rnn:
+            f_state_r = jnp.concatenate([f_state for i in range(self.lstm_channels // c)], axis=-1)
+
+        logits = actor(f_state_r, f_actions, mask)
+        value = critic(f_state_r)
         return rstate, logits, value, valid

@@ -80,6 +80,8 @@ class Args:
     """whether to use history actions as input for agent"""
     eval_use_history: bool = True
     """whether to use history actions as input for eval agent"""
+    use_rnn: bool = True
+    """whether to use RNN for the agent"""
 
     total_timesteps: int = 50000000000
     """total timesteps of the experiments"""
@@ -231,6 +233,7 @@ def create_agent(args, multi_step=False, eval=False):
         multi_step=multi_step,
         freeze_id=args.freeze_id,
         use_history=args.use_history if not eval else args.eval_use_history,
+        no_rnn=(not args.use_rnn) if not eval else False
     )
 
 
@@ -318,8 +321,8 @@ def rollout(
         rstate = jax.tree.map(
             lambda x1, x2: jnp.where(main[:, None], x1, x2), rstate1, rstate2)
         rstate, logits = get_logits(params, (rstate, next_obs))
-        rstate1 = jax.tree.map(lambda x, y: jnp.where(main[:, None], x, y), rstate, rstate1)
-        rstate2 = jax.tree.map(lambda x, y: jnp.where(main[:, None], y, x), rstate, rstate2)
+        rstate1 = jax.tree.map(lambda x1, x2: jnp.where(main[:, None], x1, x2), rstate, rstate1)
+        rstate2 = jax.tree.map(lambda x1, x2: jnp.where(main[:, None], x2, x1), rstate, rstate2)
         rstate1, rstate2 = jax.tree.map(
             lambda x: jnp.where(done[:, None], 0, x), (rstate1, rstate2))
         action, key = categorical_sample(logits, key)
