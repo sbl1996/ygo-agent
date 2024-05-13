@@ -730,6 +730,7 @@ if __name__ == "__main__":
             lambda x: jnp.sum(x * mask) / n_valids, (pg_loss, v_loss, ent_loss, approx_kl))
 
         loss = pg_loss - args.ent_coef * ent_loss + v_loss * args.vf_coef
+        loss = jnp.where(jnp.isnan(loss) | jnp.isinf(loss), 0.0, loss)
         return loss, (pg_loss, v_loss, ent_loss, jax.lax.stop_gradient(approx_kl))
 
     def single_device_update(
