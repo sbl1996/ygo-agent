@@ -339,7 +339,6 @@ class RNNAgent(nn.Module):
     embedding_shape: Optional[Union[int, Tuple[int, int]]] = None
     dtype: jnp.dtype = jnp.float32
     param_dtype: jnp.dtype = jnp.float32
-    multi_step: bool = False
     switch: bool = True
     freeze_id: bool = False
     use_history: bool = True
@@ -347,7 +346,8 @@ class RNNAgent(nn.Module):
 
     @nn.compact
     def __call__(self, inputs):
-        if self.multi_step:
+        multi_step = len(inputs) != 2
+        if multi_step:
             # (num_steps * batch_size, ...)
             *rstate, x, done, switch_or_main = inputs
         else:
@@ -380,7 +380,7 @@ class RNNAgent(nn.Module):
         elif self.rnn_type == 'none':
             f_state_r = jnp.concatenate([f_state for i in range(self.rnn_channels // c)], axis=-1)
         else:
-            if self.multi_step:
+            if multi_step:
                 rstate1, rstate2 = rstate
                 batch_size = jax.tree.leaves(rstate1)[0].shape[0]
                 num_steps = done.shape[0] // batch_size
