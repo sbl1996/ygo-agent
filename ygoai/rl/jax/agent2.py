@@ -308,7 +308,21 @@ class Critic(nn.Module):
         return x
 
 
-def rnn_forward_2p(rnn_layer, rstate1, rstate2, f_state, done, switch_or_main, switch=True):
+def rnn_step_by_main(rnn_layer, rstate, f_state, done, main):
+    if main is not None:
+        rstate1, rstate2 = rstate
+        rstate = jax.tree.map(lambda x1, x2: jnp.where(main[:, None], x1, x2), rstate1, rstate2)
+    rstate, f_state = rnn_layer(rstate, f_state)
+    if main is not None:
+        rstate1 = jax.tree.map(lambda x, y: jnp.where(main[:, None], x, y), rstate, rstate1)
+        rstate2 = jax.tree.map(lambda x, y: jnp.where(main[:, None], y, x), rstate, rstate2)
+        rstate = rstate1, rstate2
+    if done is not None:
+        rstate = jax.tree.map(lambda x: jnp.where(done[:, None], 0, x), rstate)
+    return rstate, f_state
+
+
+def rnn_forward_2p(rnn_layer, rstate, f_state, done, switch_or_main, switch=True):
     if switch:
         def body_fn(cell, carry, x, done, switch):
             rstate, init_rstate2 = carry
@@ -318,18 +332,13 @@ def rnn_forward_2p(rnn_layer, rstate1, rstate2, f_state, done, switch_or_main, s
             return (rstate, init_rstate2), y
     else:
         def body_fn(cell, carry, x, done, main):
-            rstate1, rstate2 = carry
-            rstate = jax.tree.map(lambda x1, x2: jnp.where(main[:, None], x1, x2), rstate1, rstate2)
-            rstate, y = cell(rstate, x)
-            rstate1 = jax.tree.map(lambda x, y: jnp.where(main[:, None], x, y), rstate, rstate1)
-            rstate2 = jax.tree.map(lambda x, y: jnp.where(main[:, None], y, x), rstate, rstate2)
-            rstate1, rstate2 = jax.tree.map(lambda x: jnp.where(done[:, None], 0, x), (rstate1, rstate2))
-            return (rstate1, rstate2), y
+            return rnn_step_by_main(cell, carry, x, done, main)
     scan = nn.scan(
         body_fn, variable_broadcast='params',
         split_rngs={'params': False})
-    rstate, f_state = scan(rnn_layer, (rstate1, rstate2), f_state, done, switch_or_main)
+    rstate, f_state = scan(rnn_layer, rstate, f_state, done, switch_or_main)
     return rstate, f_state
+
 
 
 class RNNAgent(nn.Module):
@@ -345,14 +354,7 @@ class RNNAgent(nn.Module):
     rnn_type: str = 'lstm'
 
     @nn.compact
-    def __call__(self, inputs):
-        multi_step = len(inputs) != 2
-        if multi_step:
-            # (num_steps * batch_size, ...)
-            *rstate, x, done, switch_or_main = inputs
-        else:
-            rstate, x = inputs
-
+    def __call__(self, x, rstate, done=None, switch_or_main=None):
         c = self.channels
         encoder = Encoder(
             channels=c,
@@ -380,17 +382,24 @@ class RNNAgent(nn.Module):
         elif self.rnn_type == 'none':
             f_state_r = jnp.concatenate([f_state for i in range(self.rnn_channels // c)], axis=-1)
         else:
+            batch_size = jax.tree.leaves(rstate)[0].shape[0]
+            num_steps = f_state.shape[0] // batch_size
+            multi_step = num_steps > 1
+
+            if done is not None:
+                assert switch_or_main is not None
+            else:
+                assert not multi_step
+
             if multi_step:
-                rstate1, rstate2 = rstate
-                batch_size = jax.tree.leaves(rstate1)[0].shape[0]
-                num_steps = done.shape[0] // batch_size
                 f_state_r, done, switch_or_main = jax.tree.map(
                     lambda x: jnp.reshape(x, (num_steps, batch_size) + x.shape[1:]), (f_state, done, switch_or_main))
                 rstate, f_state_r = rnn_forward_2p(
-                    rnn_layer, rstate1, rstate2, f_state_r, done, switch_or_main, self.switch)
+                    rnn_layer, rstate, f_state_r, done, switch_or_main, self.switch)
                 f_state_r = f_state_r.reshape((-1, f_state_r.shape[-1]))
             else:
-                rstate, f_state_r = rnn_layer(rstate, f_state)
+                rstate, f_state_r = rnn_step_by_main(
+                    rnn_layer, rstate, f_state, done, switch_or_main)
 
         actor = Actor(
             channels=c, dtype=jnp.float32, param_dtype=self.param_dtype)

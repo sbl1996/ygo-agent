@@ -294,15 +294,14 @@ def rollout(
     eval_agent = create_agent(args, eval=True)
 
     @jax.jit
-    def get_action(
-        params: flax.core.FrozenDict, inputs):
-        rstate, logits = eval_agent.apply(params, inputs)[:2]
+    def get_action(params, obs, rstate):
+        rstate, logits = eval_agent.apply(params, obs, rstate)[:2]
         return rstate, logits.argmax(axis=1)
 
     @jax.jit
-    def get_action_battle(params1, params2, rstate1, rstate2, obs, main, done):
-        next_rstate1, logits1 = agent.apply(params1, (rstate1, obs))[:2]
-        next_rstate2, logits2 = eval_agent.apply(params2, (rstate2, obs))[:2]
+    def get_action_battle(params1, params2, obs, rstate1, rstate2, main, done):
+        next_rstate1, logits1 = agent.apply(params1, obs, rstate1)[:2]
+        next_rstate2, logits2 = eval_agent.apply(params2, obs, rstate2)[:2]
         logits = jnp.where(main[:, None], logits1, logits2)
         rstate1 = jax.tree.map(
             lambda x1, x2: jnp.where(main[:, None], x1, x2), next_rstate1, rstate1)
@@ -314,19 +313,13 @@ def rollout(
 
     @jax.jit
     def sample_action(
-        params: flax.core.FrozenDict,
-        next_obs, rstate1, rstate2, main, done, key):
+        params, next_obs, rstate1, rstate2, main, done, key):
         next_obs = jax.tree.map(lambda x: jnp.array(x), next_obs)
         done = jnp.array(done)
         main = jnp.array(main)
 
-        rstate = jax.tree.map(
-            lambda x1, x2: jnp.where(main[:, None], x1, x2), rstate1, rstate2)
-        rstate, logits = agent.apply(params, (rstate, next_obs))[:2]
-        rstate1 = jax.tree.map(lambda x1, x2: jnp.where(main[:, None], x1, x2), rstate, rstate1)
-        rstate2 = jax.tree.map(lambda x1, x2: jnp.where(main[:, None], x2, x1), rstate, rstate2)
-        rstate1, rstate2 = jax.tree.map(
-            lambda x: jnp.where(done[:, None], 0, x), (rstate1, rstate2))
+        inputs = next_obs, (rstate1, rstate2), done, main
+        (rstate1, rstate2), logits = agent.apply(params, *inputs)[:2]
         action, key = categorical_sample(logits, key)
         return next_obs, done, main, rstate1, rstate2, action, logits, key
 
@@ -448,12 +441,12 @@ def rollout(
             lambda x1, x2: jnp.where(next_main[:, None], x1, x2), next_rstate1, next_rstate2)
         sharded_data = jax.tree.map(lambda x: jax.device_put_sharded(
                 np.split(x, len(learner_devices)), devices=learner_devices),
-                         (init_rstate1, init_rstate2, (next_rstate, next_obs), next_main))
+                         (init_rstate1, init_rstate2, (next_obs, next_rstate), next_main))
 
         if args.eval_interval and update % args.eval_interval == 0:
             _start = time.time()
             if eval_mode == 'bot':
-                predict_fn = lambda x: get_action(params, x)
+                predict_fn = lambda *x: get_action(params, *x)
                 eval_return, eval_ep_len, eval_win_rate = evaluate(
                     eval_envs, args.local_eval_episodes, predict_fn, eval_rstate2)
             else:
@@ -619,7 +612,7 @@ if __name__ == "__main__":
     # rstate = init_rnn_state(1, args.rnn_channels)
     agent = create_agent(args)
     rstate = agent.init_rnn_state(1)
-    params = agent.init(init_key, (rstate, sample_obs))
+    params = agent.init(init_key, sample_obs, rstate)
     if embeddings is not None:
         unknown_embed = embeddings.mean(axis=0)
         embeddings = np.concatenate([unknown_embed[None, :], embeddings], axis=0)
@@ -654,7 +647,7 @@ if __name__ == "__main__":
     if args.eval_checkpoint:
         eval_agent = create_agent(args, eval=True)
         eval_rstate = eval_agent.init_rnn_state(1)
-        eval_params = eval_agent.init(init_key, (eval_rstate, sample_obs))
+        eval_params = eval_agent.init(init_key, sample_obs, eval_rstate)
         with open(args.eval_checkpoint, "rb") as f:
             eval_params = flax.serialization.from_bytes(eval_params, f.read())
         print(f"loaded eval checkpoint from {args.eval_checkpoint}")
@@ -676,9 +669,8 @@ if __name__ == "__main__":
         if args.switch:
             dones = dones | next_dones
 
-        inputs = (rstate1, rstate2, obs, dones, switch_or_mains)
-        _rstate, new_logits, new_values, _valid = create_agent(
-            args).apply(params, inputs)
+        inputs = obs, (rstate1, rstate2), dones, switch_or_mains
+        new_logits, new_values = create_agent(args).apply(params, *inputs)[1:3]
         new_values = new_values.squeeze(-1)
 
         ratios = distrax.importance_sampling_ratios(distrax.Categorical(
@@ -780,7 +772,7 @@ if __name__ == "__main__":
             key, subkey = jax.random.split(key)
 
             next_value = create_agent(args).apply(
-                agent_state.params, next_inputs)[2].squeeze(-1)
+                agent_state.params, *next_inputs)[2].squeeze(-1)
             if args.switch:
                 next_value = jnp.where(next_main, -next_value, next_value)
             else:

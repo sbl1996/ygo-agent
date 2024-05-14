@@ -158,7 +158,7 @@ if __name__ == "__main__":
 
     agent1 = create_agent1(args)
     rstate = agent1.init_rnn_state(1)
-    params1 = jax.jit(agent1.init)(agent_key, (rstate, sample_obs))
+    params1 = jax.jit(agent1.init)(agent_key, sample_obs, rstate)
 
     with open(args.checkpoint1, "rb") as f:
         params1 = flax.serialization.from_bytes(params1, f.read())
@@ -167,7 +167,7 @@ if __name__ == "__main__":
     else:
         agent2 = create_agent2(args)
         rstate = agent2.init_rnn_state(1)
-        params2 = jax.jit(agent2.init)(agent_key, (rstate, sample_obs))
+        params2 = jax.jit(agent2.init)(agent_key, sample_obs, rstate)
         with open(args.checkpoint2, "rb") as f:
             params2 = flax.serialization.from_bytes(params2, f.read())
     
@@ -180,7 +180,7 @@ if __name__ == "__main__":
             agent = create_agent1(args)
         else:
             agent = create_agent2(args)
-        next_rstate, logits = agent.apply(params, (rstate, obs))[:2]
+        next_rstate, logits = agent.apply(params, obs, rstate)[:2]
         probs = jax.nn.softmax(logits, axis=-1)
         if done is not None:
             next_rstate = jnp.where(done[:, None], 0, next_rstate)

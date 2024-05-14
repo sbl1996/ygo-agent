@@ -11,7 +11,7 @@ def evaluate(envs, num_episodes, predict_fn, rnn_state=None):
         if rnn_state is None:
             actions = predict_fn(obs)
         else:
-            rnn_state, actions = predict_fn((rnn_state, obs))
+            rnn_state, actions = predict_fn(obs, rnn_state)
         actions = np.array(actions)
 
         obs, rewards, dones, info = envs.step(actions)
@@ -53,7 +53,7 @@ def battle(envs, num_episodes, predict_fn, rstate1=None, rstate2=None):
 
     while True:
         main = next_to_play == main_player
-        rstate1, rstate2, actions = predict_fn(rstate1, rstate2, obs, main, dones)
+        rstate1, rstate2, actions = predict_fn(obs, rstate1, rstate2, main, dones)
         actions = np.array(actions)
 
         obs, rewards, dones, infos = envs.step(actions)

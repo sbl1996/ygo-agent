@@ -145,7 +145,7 @@ if __name__ == "__main__":
         sample_obs = jax.tree.map(lambda x: jnp.array([x]), obs_space.sample())
 
         rstate = agent.init_rnn_state(1)
-        params = jax.jit(agent.init)(agent_key, (rstate, sample_obs))
+        params = jax.jit(agent.init)(agent_key, sample_obs, rstate)
 
         with open(args.checkpoint, "rb") as f:
             params = flax.serialization.from_bytes(params, f.read())
@@ -154,8 +154,7 @@ if __name__ == "__main__":
 
         @jax.jit
         def get_probs_and_value(params, rstate, obs, done):
-            agent = agent
-            next_rstate, logits, value = agent.apply(params, (rstate, obs))[:3]
+            next_rstate, logits, value = agent.apply(params, obs, rstate)[:3]
             probs = jax.nn.softmax(logits, axis=-1)
             next_rstate = jax.tree.map(
                 lambda x: jnp.where(done[:, None], 0, x), next_rstate)
