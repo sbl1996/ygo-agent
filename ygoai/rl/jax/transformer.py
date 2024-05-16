@@ -596,7 +596,6 @@ class GLUMlpBlock(nn.Module):
                 param_dtype=self.param_dtype,
                 kernel_init=self.kernel_init,
                 bias_init=self.bias_init,
-                shard=self.shard,
             ) for _ in range(3)
         ]
 
@@ -631,7 +630,10 @@ class EncoderLayer(nn.Module):
     deterministic: bool = True
 
     @nn.compact
-    def __call__(self, inputs, src_key_padding_mask=None):
+    def __call__(
+        self, inputs, src_key_padding_mask=None,
+        attn_scale=None, attn_bias=None,
+        output_scale=None, output_bias=None):
         inputs = jnp.asarray(inputs, self.dtype)
         x = nn.LayerNorm(epsilon=self.layer_norm_epsilon,
                          dtype=self.dtype, name="ln_1")(inputs)
@@ -648,6 +650,11 @@ class EncoderLayer(nn.Module):
         x = nn.Dropout(rate=self.resid_pdrop)(
             x, deterministic=self.deterministic)
 
+        if attn_scale is not None:
+            x = x * attn_scale
+        if attn_bias is not None:
+            x = x + attn_bias
+
         x = x + inputs
 
         y = nn.LayerNorm(epsilon=self.layer_norm_epsilon,
@@ -662,7 +669,13 @@ class EncoderLayer(nn.Module):
             name="mlp")(y)
         y = nn.Dropout(rate=self.resid_pdrop)(
             y, deterministic=self.deterministic)
+
+        if output_scale is not None:
+            y = y * output_scale
+        if output_bias is not None:
+            y = y + output_bias
         y = x + y
+
         return y
 
 
@@ -733,8 +746,9 @@ class DecoderLayer(nn.Module):
 
 class LlamaEncoderLayer(nn.Module):
     n_heads: int
-    intermediate_size: int
+    intermediate_size: Optional[int] = None
     n_positions: int = 512
+    rope: bool = True
     dtype: Any = None
     param_dtype: Any = jnp.float32
     attn_pdrop: float = 0.0
@@ -745,11 +759,17 @@ class LlamaEncoderLayer(nn.Module):
     deterministic: bool = True
 
     @nn.compact
-    def __call__(self, inputs, src_key_padding_mask=None):
+    def __call__(
+        self, inputs, src_key_padding_mask=None,
+        attn_scale=None, attn_bias=None,
+        output_scale=None, output_bias=None):
+        features = inputs.shape[-1]
+        intermediate_size = self.intermediate_size or 2 * features
+
         x = RMSNorm(epsilon=self.rms_norm_eps,
                     dtype=self.dtype, name="ln_1")(inputs)
         x = MultiheadAttention(
-            features=x.shape[-1],
+            features=features,
             num_heads=self.n_heads,
             max_len=self.n_positions,
             dtype=self.dtype,
@@ -757,19 +777,24 @@ class LlamaEncoderLayer(nn.Module):
             kernel_init=self.kernel_init,
             qkv_bias=False,
             out_bias=False,
-            rope=True,
+            rope=self.rope,
             dropout_rate=self.attn_pdrop,
             deterministic=self.deterministic,
             name="attn")(x, x, x, key_padding_mask=src_key_padding_mask)
         x = nn.Dropout(rate=self.resid_pdrop)(
             x, deterministic=self.deterministic)
 
+        if attn_scale is not None:
+            x = x * attn_scale
+        if attn_bias is not None:
+            x = x + attn_bias
+
         x = x + inputs
 
         y = RMSNorm(epsilon=self.rms_norm_eps,
                     dtype=self.dtype, name="ln_2")(x)
         y = GLUMlpBlock(
-            intermediate_size=self.intermediate_size,
+            intermediate_size=intermediate_size,
             dtype=self.dtype,
             param_dtype=self.param_dtype,
             kernel_init=self.kernel_init,
@@ -777,6 +802,12 @@ class LlamaEncoderLayer(nn.Module):
             name="mlp")(y)
         y = nn.Dropout(rate=self.resid_pdrop)(
             y, deterministic=self.deterministic)
+
+        if output_scale is not None:
+            y = y * output_scale
+        if output_bias is not None:
+            y = y + output_bias
+
         y = x + y
         return y
 
@@ -785,6 +816,7 @@ class LlamaDecoderLayer(nn.Module):
     n_heads: int
     intermediate_size: int
     n_positions: int = 512
+    rope: bool = True
     dtype: Any = None
     param_dtype: Any = jnp.float32
     attn_pdrop: float = 0.0
@@ -808,7 +840,7 @@ class LlamaDecoderLayer(nn.Module):
             kernel_init=self.kernel_init,
             qkv_bias=False,
             out_bias=False,
-            rope=True,
+            rope=self.rope,
             dropout_rate=self.attn_pdrop,
             deterministic=self.deterministic,
             name="self_attn")(x, x, x, key_padding_mask=tgt_key_padding_mask)
@@ -827,7 +859,7 @@ class LlamaDecoderLayer(nn.Module):
             kernel_init=self.kernel_init,
             qkv_bias=False,
             out_bias=False,
-            rope=True,
+            rope=self.rope,
             dropout_rate=self.attn_pdrop,
             deterministic=self.deterministic,
             name="cross_attn")(y, memory, memory, key_padding_mask=memory_key_padding_mask)

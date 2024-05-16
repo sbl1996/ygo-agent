@@ -1,4 +1,5 @@
-from typing import Tuple, Union, Optional, Sequence
+from dataclasses import dataclass
+from typing import Tuple, Union, Optional, Sequence, Literal
 from functools import partial
 
 import numpy as np
@@ -6,13 +7,20 @@ import jax
 import jax.numpy as jnp
 import flax.linen as nn
 
-from ygoai.rl.jax.transformer import EncoderLayer, PositionalEncoding
+from ygoai.rl.jax.transformer import EncoderLayer, PositionalEncoding, LlamaEncoderLayer
 from ygoai.rl.jax.modules import MLP, make_bin_params, bytes_to_bin, decode_id
 
 
 default_embed_init = nn.initializers.uniform(scale=0.001)
 default_fc_init1 = nn.initializers.uniform(scale=0.001)
 default_fc_init2 = nn.initializers.uniform(scale=0.001)
+
+
+def get_encoder_layer_cls(noam, n_heads, dtype, param_dtype):
+    if noam:
+        return LlamaEncoderLayer(n_heads, dtype=dtype, param_dtype=param_dtype, rope=False)
+    else:
+        return EncoderLayer(n_heads, dtype=dtype, param_dtype=param_dtype)
 
 
 class ActionEncoder(nn.Module):
@@ -69,6 +77,8 @@ class CardEncoder(nn.Module):
         x_id = layer_norm()(x_id)
 
         x_loc = x1[:, :, 0]
+        c_mask = x_loc == 0
+        c_mask = c_mask.at[:, 0].set(False)
         f_loc = layer_norm()(embed(9, c)(x_loc))
 
         x_seq = x1[:, :, 1]
@@ -97,7 +107,7 @@ class CardEncoder(nn.Module):
         
         f_cards = jnp.concatenate([x_id, x_f], axis=-1)
         f_cards = f_cards + f_loc + f_seq
-        return f_cards
+        return f_cards, c_mask
 
 
 class GlobalEncoder(nn.Module):
@@ -153,6 +163,8 @@ class Encoder(nn.Module):
     param_dtype: jnp.dtype = jnp.float32
     freeze_id: bool = False
     use_history: bool = True
+    card_mask: bool = False
+    noam: bool = False
 
     @nn.compact
     def __call__(self, x):
@@ -188,7 +200,7 @@ class Encoder(nn.Module):
             x_id = jax.lax.stop_gradient(x_id)
 
         # Cards
-        f_cards = CardEncoder(
+        f_cards, c_mask = CardEncoder(
             channels=c, dtype=jnp.float32, param_dtype=self.param_dtype)(x_id, x_cards[:, :, 2:])
         g_card_embed = self.param(
             'g_card_embed',
@@ -196,10 +208,16 @@ class Encoder(nn.Module):
             (1, c), self.param_dtype)
         f_g_card = jnp.tile(g_card_embed, (batch_size, 1, 1)).astype(f_cards.dtype)
         f_cards = jnp.concatenate([f_g_card, f_cards], axis=1)
+        if self.card_mask:
+            c_mask = jnp.concatenate([jnp.zeros((batch_size, 1), dtype=c_mask.dtype), c_mask], axis=1)
+        else:
+            c_mask = None
 
         num_heads = max(2, c // 128)
         for _ in range(self.num_layers):
-            f_cards = EncoderLayer(num_heads, dtype=self.dtype, param_dtype=self.param_dtype)(f_cards)
+            f_cards = get_encoder_layer_cls(
+                self.noam, num_heads, dtype=self.dtype, param_dtype=self.param_dtype)(
+                f_cards, src_key_padding_mask=c_mask)
         f_cards = layer_norm(dtype=self.dtype)(f_cards)
         f_g_card = f_cards[:, 0]
 
@@ -294,6 +312,32 @@ class Actor(nn.Module):
         return logits
 
 
+class FiLMActor(nn.Module):
+    channels: int = 128
+    dtype: Optional[jnp.dtype] = None
+    param_dtype: jnp.dtype = jnp.float32
+    noam: bool = False
+
+    @nn.compact
+    def __call__(self, f_state, f_actions, mask):
+        f_state = f_state.astype(self.dtype)
+        f_actions = f_actions.astype(self.dtype)
+        c = self.channels
+        t = nn.Dense(c * 4, dtype=self.dtype, param_dtype=self.param_dtype)(f_state)
+        a_s, a_b, o_s, o_b  = jnp.split(t[:, None, :], 4, axis=-1)
+
+        num_heads = max(2, c // 128)
+        f_actions = get_encoder_layer_cls(
+            self.noam, num_heads, dtype=self.dtype, param_dtype=self.param_dtype)(
+            f_actions, mask, a_s, a_b, o_s, o_b)
+
+        logits = nn.Dense(1, dtype=jnp.float32, param_dtype=self.param_dtype,
+                          kernel_init=nn.initializers.orthogonal(0.01))(f_actions)[:, :, 0]
+        big_neg = jnp.finfo(logits.dtype).min
+        logits = jnp.where(mask, big_neg, logits)
+        return logits
+
+
 class Critic(nn.Module):
     channels: Sequence[int] = (128, 128, 128)
     dtype: Optional[jnp.dtype] = None
@@ -340,10 +384,29 @@ def rnn_forward_2p(rnn_layer, rstate, f_state, done, switch_or_main, switch=True
     return rstate, f_state
 
 
+@dataclass
+class ModelArgs:
+    num_layers: int = 2
+    """the number of layers for the agent"""
+    num_channels: int = 128
+    """the number of channels for the agent"""
+    rnn_channels: int = 512
+    """the number of channels for the RNN in the agent"""
+    use_history: bool = True
+    """whether to use history actions as input for agent"""
+    card_mask: bool = False
+    """whether to mask the padding card as ignored in the transformer"""
+    rnn_type: Optional[Literal['lstm', 'gru', 'none']] = "lstm"
+    """the type of RNN to use, None for no RNN"""
+    film: bool = False
+    """whether to use FiLM for the actor"""
+    noam: bool = False
+    """whether to use Noam architecture for the transformer layer"""
+
 
 class RNNAgent(nn.Module):
-    channels: int = 128
     num_layers: int = 2
+    num_channels: int = 128
     rnn_channels: int = 512
     embedding_shape: Optional[Union[int, Tuple[int, int]]] = None
     dtype: jnp.dtype = jnp.float32
@@ -351,11 +414,14 @@ class RNNAgent(nn.Module):
     switch: bool = True
     freeze_id: bool = False
     use_history: bool = True
+    card_mask: bool = False
     rnn_type: str = 'lstm'
+    film: bool = False
+    noam: bool = False
 
     @nn.compact
     def __call__(self, x, rstate, done=None, switch_or_main=None):
-        c = self.channels
+        c = self.num_channels
         encoder = Encoder(
             channels=c,
             num_layers=self.num_layers,
@@ -364,6 +430,8 @@ class RNNAgent(nn.Module):
             param_dtype=self.param_dtype,
             freeze_id=self.freeze_id,
             use_history=self.use_history,
+            card_mask=self.card_mask,
+            noam=self.noam,
         )
 
         f_actions, f_state, mask, valid = encoder(x)
@@ -401,8 +469,12 @@ class RNNAgent(nn.Module):
                 rstate, f_state_r = rnn_step_by_main(
                     rnn_layer, rstate, f_state, done, switch_or_main)
 
-        actor = Actor(
-            channels=c, dtype=jnp.float32, param_dtype=self.param_dtype)
+        if self.film:
+            actor = FiLMActor(
+                channels=c, dtype=jnp.float32, param_dtype=self.param_dtype, noam=self.noam)
+        else:
+            actor = Actor(
+                channels=c, dtype=jnp.float32, param_dtype=self.param_dtype)
         critic = Critic(
             channels=[c, c, c], dtype=self.dtype, param_dtype=self.param_dtype)
         

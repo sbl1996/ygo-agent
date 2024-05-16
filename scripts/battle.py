@@ -3,7 +3,7 @@ import time
 import os
 import random
 from typing import Optional
-from dataclasses import dataclass
+from dataclasses import dataclass, field, asdict
 from tqdm import tqdm
 from functools import partial
 
@@ -18,7 +18,7 @@ import flax
 
 from ygoai.utils import init_ygopro
 from ygoai.rl.utils import RecordEpisodeStatistics
-from ygoai.rl.jax.agent2 import RNNAgent
+from ygoai.rl.jax.agent2 import RNNAgent, ModelArgs
 
 
 @dataclass
@@ -44,10 +44,6 @@ class Args:
     """the number of history actions to use"""
     num_embeddings: Optional[int] = None
     """the number of embeddings of the agent"""
-    use_history1: bool = True
-    """whether to use history actions as input for agent1"""
-    use_history2: bool = True
-    """whether to use history actions as input for agent2"""
 
     verbose: bool = False
     """whether to print debug information"""
@@ -59,16 +55,11 @@ class Args:
     num_envs: int = 64
     """the number of parallel game environments"""
 
-    num_layers: int = 2
-    """the number of layers for the agent"""
-    num_channels: int = 128
-    """the number of channels for the agent"""
-    rnn_channels: Optional[int] = 512
-    """the number of rnn channels for the agent"""
-    rnn_type1: Optional[str] = "lstm"
-    """the type of RNN to use for agent1, None for no RNN"""
-    rnn_type2: Optional[str] = "lstm"
-    """the type of RNN to use for agent2, None for no RNN"""
+    m1: ModelArgs = field(default_factory=lambda: ModelArgs())
+    """the model arguments for the agent1"""
+    m2: ModelArgs = field(default_factory=lambda: ModelArgs())
+    """the model arguments for the agent2"""
+
     checkpoint1: str = "checkpoints/agent.pt"
     """the checkpoint to load for the first agent, must be a `flax_model` file"""
     checkpoint2: str = "checkpoints/agent.pt"
@@ -83,23 +74,15 @@ class Args:
 
 def create_agent1(args):
     return RNNAgent(
-        channels=args.num_channels,
-        num_layers=args.num_layers,
-        rnn_channels=args.rnn_channels,
+        **asdict(args.m1),
         embedding_shape=args.num_embeddings,
-        use_history=args.use_history1,
-        rnn_type=args.rnn_type1,
     )
 
 
 def create_agent2(args):
     return RNNAgent(
-        channels=args.num_channels,
-        num_layers=args.num_layers,
-        rnn_channels=args.rnn_channels,
+        **asdict(args.m2),
         embedding_shape=args.num_embeddings,
-        use_history=args.use_history2,
-        rnn_type=args.rnn_type2,
     )
 
 

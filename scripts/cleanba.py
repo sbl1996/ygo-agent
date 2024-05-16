@@ -6,7 +6,7 @@ import threading
 import time
 from datetime import datetime, timedelta, timezone
 from collections import deque
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, asdict
 from types import SimpleNamespace
 from typing import List, NamedTuple, Optional
 from functools import partial
@@ -25,7 +25,7 @@ from tensorboardX import SummaryWriter
 
 from ygoai.utils import init_ygopro, load_embeddings
 from ygoai.rl.ckpt import ModelCheckpoint, sync_to_gcs, zip_files
-from ygoai.rl.jax.agent2 import RNNAgent
+from ygoai.rl.jax.agent2 import RNNAgent, ModelArgs
 from ygoai.rl.jax.utils import RecordEpisodeStatistics, masked_normalize, categorical_sample
 from ygoai.rl.jax.eval import evaluate, battle
 from ygoai.rl.jax import clipped_surrogate_pg_loss, vtrace_2p0s, mse_loss, entropy_loss, simple_policy_loss, ach_loss, policy_gradient_loss
@@ -80,10 +80,6 @@ class Args:
     """the number of history actions to use"""
     greedy_reward: bool = False
     """whether to use greedy reward (faster kill higher reward)"""
-    use_history: bool = True
-    """whether to use history actions as input for agent"""
-    eval_use_history: bool = True
-    """whether to use history actions as input for eval agent"""
 
     total_timesteps: int = 50000000000
     """total timesteps of the experiments"""
@@ -146,16 +142,10 @@ class Args:
     max_grad_norm: float = 1.0
     """the maximum norm for the gradient clipping"""
 
-    num_layers: int = 2
-    """the number of layers for the agent"""
-    num_channels: int = 128
-    """the number of channels for the agent"""
-    rnn_channels: int = 512
-    """the number of channels for the RNN in the agent"""
-    rnn_type: Optional[str] = "lstm"
-    """the type of RNN to use, None for no RNN"""
-    eval_rnn_type: Optional[str] = "lstm"
-    """the type of RNN to use for evaluation, None for no RNN"""
+    m1: ModelArgs = field(default_factory=lambda: ModelArgs())
+    """the model arguments for the agent"""
+    m2: ModelArgs = field(default_factory=lambda: ModelArgs())
+    """the model arguments for the eval agent"""
 
     actor_device_ids: List[int] = field(default_factory=lambda: [0, 1])
     """the device ids that actor workers will use"""
@@ -228,18 +218,22 @@ class Transition(NamedTuple):
 
 
 def create_agent(args, eval=False):
-    return RNNAgent(
-        channels=args.num_channels,
-        num_layers=args.num_layers,
-        embedding_shape=args.num_embeddings,
-        dtype=jnp.bfloat16 if args.bfloat16 else jnp.float32,
-        param_dtype=jnp.float32,
-        rnn_channels=args.rnn_channels,
-        switch=args.switch,
-        freeze_id=args.freeze_id,
-        use_history=args.use_history if not eval else args.eval_use_history,
-        rnn_type=args.rnn_type if not eval else args.eval_rnn_type,
-    )
+    if eval:
+        return RNNAgent(
+            embedding_shape=args.num_embeddings,
+            dtype=jnp.bfloat16 if args.bfloat16 else jnp.float32,
+            param_dtype=jnp.float32,
+            **asdict(args.m2),
+        )        
+    else:
+        return RNNAgent(
+            embedding_shape=args.num_embeddings,
+            dtype=jnp.bfloat16 if args.bfloat16 else jnp.float32,
+            param_dtype=jnp.float32,
+            switch=args.switch,
+            freeze_id=args.freeze_id,
+            **asdict(args.m1),
+        )
 
 
 def init_rnn_state(num_envs, rnn_channels):
