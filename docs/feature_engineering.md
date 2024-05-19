@@ -1,8 +1,12 @@
 # Features
 
 ## Definitions
+
+### Float transform
 - float transform: max 65535 -> 2 bytes
-- count
+
+### Card ID
+The card id is the index of the card code in `code_list.txt`.
 
 ## Card
 - 0,1: card id, uint16 -> 2 uint8, name+desc
@@ -11,7 +15,7 @@
 - 4: owner, discrete, 0: me, 1: oppo (2)
 - 5: position, discrete, 0: N/A, 1+: same as position2str
 - 6: overlay, discrete, 0: not, 1: xyz material
-- 7: attribute, discrete, 0: N/A, 1+: same as attribute2str[2:]
+- 7: attribute, discrete, 0: N/A, 1+: same as attribute2str
 - 8: race, discrete, 0: N/A, 1+: same as race2str
 - 9: level, discrete, 0: N/A
 - 10: counter, discrete, 0: N/A

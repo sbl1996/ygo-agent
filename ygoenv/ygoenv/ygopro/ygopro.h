@@ -3700,6 +3700,7 @@ private:
         pl->notify("Battle menu:");
       }
       for (const auto [code, spec, data] : activatable) {
+        // TODO: Add effect description to indicate which effect is being activated
         options_.push_back("v " + spec);
         if (verbose_) {
           auto [loc, seq, pos] = spec_to_ls(spec);
@@ -3710,18 +3711,27 @@ private:
         }
       }
       for (const auto [code, spec, data] : attackable) {
+        // TODO: add this as feature
+        bool direct_attackable = data & 0x1;
         options_.push_back("a " + spec);
         if (verbose_) {
           auto [loc, seq, pos] = spec_to_ls(spec);
           auto c = get_card(player, loc, seq);
+          std::string s;
           if (c.type_ & TYPE_LINK) {
-            pl->notify("a " + spec + ": " + c.name_ + " (" +
-                       std::to_string(c.attack_) + ") attack");
+            s = "a " + spec + ": " + c.name_ + " (" +
+                std::to_string(c.attack_) + ")";
           } else {
-            pl->notify("a " + spec + ": " + c.name_ + " (" +
-                       std::to_string(c.attack_) + "/" +
-                       std::to_string(c.defense_) + ") attack");
+            s = "a " + spec + ": " + c.name_ + " (" +
+                std::to_string(c.attack_) + "/" +
+                std::to_string(c.defense_) + ")";
           }
+          if (direct_attackable) {
+            s += " direct attack";
+          } else {
+            s += " attack";
+          }
+          pl->notify(s);
         }
       }
       if (to_m2) {
@@ -3756,6 +3766,7 @@ private:
         }
       };
     } else if (msg_ == MSG_SELECT_UNSELECT_CARD) {
+      // TODO: add feature of selected cards (also for multi select)
       auto player = read_u8();
       bool finishable = read_u8();
       bool cancelable = read_u8();
@@ -4171,6 +4182,7 @@ private:
         auto cs = code_to_spec(spec_code);
         auto chain_count = chain_counts[spec_code];
         if (chain_count > 1) {
+          // TODO: should use desc to indicate activate which effect
           cs.push_back('a' + chain_orders[spec_code]);
         }
         chain_orders[spec_code]++;
@@ -4207,7 +4219,12 @@ private:
       to_play_ = player;
       callback_ = [this, forced](int idx) {
         const auto &option = options_[idx];
-        if ((option == "c") && (!forced)) {
+        if (option == "c") {
+          if (forced) {
+            fmt::print("cancel not allowed in forced chain\n");
+            YGO_SetResponsei(pduel_, 0);
+            return;
+          }
           YGO_SetResponsei(pduel_, -1);
           return;
         }
@@ -4437,6 +4454,7 @@ private:
       }
       ankerl::unordered_dense::map<std::string, int> activate_count;
       for (const auto &[code, spec, data] : idle_activate_) {
+        // TODO: use effect description to indicate which effect to activate
         std::string option = "v " + spec;
         int count = idle_activate_count[spec];
         activate_count[spec]++;
@@ -4698,6 +4716,7 @@ private:
       };
 
     } else if (msg_ == MSG_SELECT_POSITION) {
+      // TODO: add card as feature
       auto player = read_u8();
       auto code = read_u32();
       auto valid_pos = read_u8();
