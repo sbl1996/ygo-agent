@@ -26,7 +26,7 @@ class Args:
     seed: int = 1
     """the random seed"""
 
-    env_id: str = "YGOPro-v0"
+    env_id: str = "YGOPro-v1"
     """the id of the environment"""
     deck: str = "../assets/deck"
     """the deck file to use"""

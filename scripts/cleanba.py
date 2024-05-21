@@ -62,7 +62,7 @@ class Args:
     """the GCS bucket to save the model checkpoints"""
 
     # Algorithm specific arguments
-    env_id: str = "YGOPro-v0"
+    env_id: str = "YGOPro-v1"
     """the id of the environment"""
     deck: str = "../assets/deck"
     """the deck file to use"""
