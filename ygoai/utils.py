@@ -41,7 +41,12 @@ def init_ygopro(env_id, lang, deck, code_list_file, preload_tokens=False):
 			raise FileNotFoundError(f"Token deck not found: {token_deck}")
 		decks["_tokens"] = str(token_deck)
 	if 'YGOPro' in env_id:
-		from ygoenv.ygopro import init_module
+		if env_id == 'YGOPro-v1':
+			from ygoenv.ygopro import init_module
+		elif env_id == 'YGOPro-v0':
+			from ygoenv.ygopro0 import init_module
+		else:
+			raise ValueError(f"Unknown YGOPro environment: {env_id}")
 	elif 'EDOPro' in env_id:
 		from ygoenv.edopro import init_module
 	init_module(str(db_path), code_list_file, decks)

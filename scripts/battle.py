@@ -18,7 +18,7 @@ import flax
 
 from ygoai.utils import init_ygopro
 from ygoai.rl.utils import RecordEpisodeStatistics
-from ygoai.rl.jax.agent2 import RNNAgent, ModelArgs
+from ygoai.rl.jax.agent import RNNAgent, ModelArgs
 
 
 @dataclass

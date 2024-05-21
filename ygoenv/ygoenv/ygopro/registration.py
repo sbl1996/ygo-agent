@@ -1,7 +1,7 @@
 from ygoenv.registration import register
 
 register(
-  task_id="YGOPro-v0",
+  task_id="YGOPro-v1",
   import_path="ygoenv.ygopro",
   spec_cls="YGOProEnvSpec",
   dm_cls="YGOProDMEnvPool",

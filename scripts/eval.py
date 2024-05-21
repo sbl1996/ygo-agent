@@ -135,7 +135,7 @@ if __name__ == "__main__":
         import jax
         import jax.numpy as jnp
         import flax
-        from ygoai.rl.jax.agent2 import RNNAgent
+        from ygoai.rl.jax.agent import RNNAgent
         from jax.experimental.compilation_cache import compilation_cache as cc
         cc.set_cache_dir(os.path.expanduser("~/.cache/jax"))
 
@@ -168,7 +168,6 @@ if __name__ == "__main__":
 
 
     obs, infos = envs.reset()
-    print(obs)
     next_to_play = infos['to_play']
     dones = np.zeros(num_envs, dtype=np.bool_)
 

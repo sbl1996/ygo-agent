@@ -49,50 +49,42 @@ The card id is the index of the card code in `code_list.txt`.
 
 
 ## Legal Actions
-- 0,1: spec index, uint16 -> 2 uint8
-- 2: msg, discrete, 0: N/A, 1+: same as msg2str (15)
-- 3: act, discrete (11)
+- 0: spec index
+- 1,2: code, uint16 -> 2 uint8
+- 3: msg, discrete, 0: N/A, 1+: same as msg2str (15)
+- 4: act, discrete (11)
   - N/A
-  - t: Set
-  - r: Reposition
-  - c: Special Summon
-  - s: Summon Face-up Attack
-  - m: Summon Face-down Defense
-  - a: Attack
-  - v: Activate
-  - v2: Activate the second effect
-  - v3: Activate the third effect
-  - v4: Activate the fourth effect
-- 4: yes/no, discrete (3)
+  - Set
+  - Reposition
+  - Special Summon
+  - Summon Face-up Attack
+  - Summon Face-down Defense
+  - Attack
+  - DirectAttack
+  - Activate
+  - Cancel
+- 5: finish, discrete (2)
   - N/A
-  - Yes
-  - No
-- 5: phase, discrete (4)
+  - Finish
+- 6: effect, discrete, 0: N/A
+- 7: phase, discrete (4)
   - N/A
   - Battle (b)
   - Main Phase 2 (m)
   - End Phase (e)
-- 6: cancel, discrete (2)
-  - N/A
-  - Cancel
-- 7: finish, discrete (2)
-  - N/A
-  - Finish
 - 8: position, discrete, 0: N/A, same as position2str
-- 9: option, discrete, 0: N/A
-- 10: number, discrete, 0: N/A
-- 11: place, discrete
+- 9: number, discrete, 0: N/A
+- 10: place, discrete
   - 0: N/A
   - 1-7: m
   - 8-15: s
   - 16-22: om
   - 23-30: os
-- 12: attribute, discrete, 0: N/A, same as attribute2id
+- 11: attribute, discrete, 0: N/A, same as attribute2id
 
 
 ## History Actions
 - 0,1: card id, uint16 -> 2 uint8
-- 2-12 same as legal actions
-- 13: player, discrete, 0: me, 1: oppo
-- 14: turn, discrete, trunc to 3
-
+- 2-11 same as legal actions
+- 12: turn, discrete, trunc to 3
+- 13: phase, discrete (10)
