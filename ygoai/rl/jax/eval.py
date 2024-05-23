@@ -37,6 +37,7 @@ def evaluate(envs, num_episodes, predict_fn, rnn_state=None):
 
 
 def battle(envs, num_episodes, predict_fn, rstate1=None, rstate2=None):
+    assert num_episodes == envs.num_envs
     num_envs = envs.num_envs
     episode_rewards = []
     episode_lengths = []
@@ -45,6 +46,7 @@ def battle(envs, num_episodes, predict_fn, rstate1=None, rstate2=None):
     obs, infos = envs.reset()
     next_to_play = infos['to_play']
     dones = np.zeros(num_envs, dtype=np.bool_)
+    collected = np.zeros((num_episodes,), dtype=np.bool_)
 
     main_player = np.concatenate([
         np.zeros(num_envs // 2, dtype=np.int64),
@@ -60,8 +62,9 @@ def battle(envs, num_episodes, predict_fn, rstate1=None, rstate2=None):
         next_to_play = infos['to_play']
 
         for idx, d in enumerate(dones):
-            if not d:
+            if not d or collected[idx]:
                 continue
+            collected[idx] = True
             episode_length = infos['l'][idx]
             episode_reward = infos['r'][idx] * (1 if main[idx] else -1)
             win = 1 if episode_reward > 0 else 0

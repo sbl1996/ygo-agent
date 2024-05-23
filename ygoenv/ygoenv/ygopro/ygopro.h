@@ -2230,7 +2230,7 @@ public:
 
       if (play_mode_ == kSelfPlay) {
         // to_play_ is the previous player
-        reward = winner_ == to_play_ ? base_reward : -base_reward;
+        reward = winner_ == player ? base_reward : -base_reward;
       } else {
         reward = winner_ == ai_player_ ? base_reward : -base_reward;
       }
@@ -2403,21 +2403,21 @@ private:
   const SpecInfo& find_spec_info(SpecInfos &spec_infos, const std::string &spec) {
     auto it = spec_infos.find(spec);
     if (it == spec_infos.end()) {
-        // TODO(2): find the root cause
-        // print spec2index
-        show_deck(0);
-        show_deck(1);
-        show_buffer();
-        show_turn();
-        fmt::println("MS: idx: {}, mode: {}, min: {}, max: {}, must: {}, specs: {}, combs: {}", ms_idx_, ms_mode_, ms_min_, ms_max_, ms_must_, ms_specs_, ms_combs_);
-        fmt::println("Spec: {}, Spec2index:", spec);
-        for (auto &[k, v] : spec_infos) {
-          fmt::print("{}: {} {}, ", k, v.index, v.cid);
-        }
-        fmt::print("\n");
-        // throw std::runtime_error("Spec not found: " + spec);
-        spec_infos[spec] = {1, 1};
-        return spec_infos[spec];
+      // TODO(2): find the root cause
+      // print spec2index
+      show_deck(0);
+      show_deck(1);
+      show_buffer();
+      show_turn();
+      fmt::println("MS: idx: {}, mode: {}, min: {}, max: {}, must: {}, specs: {}, combs: {}", ms_idx_, ms_mode_, ms_min_, ms_max_, ms_must_, ms_specs_, ms_combs_);
+      fmt::println("Spec: {}, Spec2index:", spec);
+      for (auto &[k, v] : spec_infos) {
+        fmt::print("{}: {} {}, ", k, v.index, v.cid);
+      }
+      fmt::print("\n");
+      // throw std::runtime_error("Spec not found: " + spec);
+      spec_infos[spec] = {0, 0};
+      return spec_infos[spec];
     }
     return it->second;
   }
