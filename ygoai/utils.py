@@ -23,7 +23,7 @@ _languages = {
     "chinese": "zh",
 }
 
-def init_ygopro(env_id, lang, deck, code_list_file, preload_tokens=False):
+def init_ygopro(env_id, lang, deck, code_list_file, preload_tokens=False, return_deck_names=False):
 	short = _languages[lang]
 	db_path = Path(get_root_directory(), 'assets', 'locale', short, 'cards.cdb')
 	deck_fp = Path(deck)
@@ -50,6 +50,10 @@ def init_ygopro(env_id, lang, deck, code_list_file, preload_tokens=False):
 	elif 'EDOPro' in env_id:
 		from ygoenv.edopro import init_module
 	init_module(str(db_path), code_list_file, decks)
+	if return_deck_names:
+		if "_tokens" in decks:
+			del decks["_tokens"]
+		return deck_name, list(decks.keys())
 	return deck_name
 
 

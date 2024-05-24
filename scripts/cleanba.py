@@ -43,6 +43,8 @@ class Args:
     """seed of the experiment"""
     log_frequency: int = 10
     """the logging frequency of the model performance (in terms of `updates`)"""
+    time_log_freq: int = 1000
+    """the logging frequency of the deck time statistics"""
     save_interval: int = 400
     """the frequency of saving the model (in terms of `updates`)"""
     checkpoint: Optional[str] = None
@@ -181,6 +183,7 @@ class Args:
     learner_devices: Optional[List[str]] = None
     num_embeddings: Optional[int] = None
     freeze_id: Optional[bool] = None
+    deck_names: Optional[List[str]] = None
 
 
 def make_env(args, seed, num_envs, num_threads, mode='self', thread_affinity_offset=-1, eval=False):
@@ -317,6 +320,11 @@ def rollout(
         action, key = categorical_sample(logits, key)
         return next_obs, done, main, rstate1, rstate2, action, logits, key
 
+    deck_names = args.deck_names
+    deck_avg_times = {name: 0 for name in deck_names}
+    deck_max_times = {name: 0 for name in deck_names}
+    deck_time_count = {name: 0 for name in deck_names}
+
     # put data in the last index
     params_queue_get_time = deque(maxlen=10)
     rollout_time = deque(maxlen=10)
@@ -410,6 +418,21 @@ def rollout(
                             t.next_dones[idx] = True
                             t.rewards[idx] = -next_reward[idx]
                             break
+
+                for i in range(2):
+                    deck_time = info['step_time'][idx][i]
+                    deck_name = deck_names[info['deck'][idx][i]]
+
+                    time_count = deck_time_count[deck_name]
+                    avg_time = deck_avg_times[deck_name]
+                    avg_time = avg_time * (time_count / (time_count + 1)) + deck_time / (time_count + 1)
+                    max_time = max(deck_time, deck_max_times[deck_name])
+                    deck_avg_times[deck_name] = avg_time
+                    deck_max_times[deck_name] = max_time
+                    deck_time_count[deck_name] += 1
+                    if deck_time_count[deck_name] % args.time_log_freq == 0:
+                        print(f"Deck {deck_name}, avg: {avg_time * 1000:.2f}, max: {max_time * 1000:.2f}")
+
                 episode_reward = info['r'][idx] * (1 if cur_main else -1)
                 win = 1 if episode_reward > 0 else 0
                 avg_ep_returns.append(episode_reward)
@@ -584,7 +607,8 @@ def main():
     learner_keys = jax.device_put_sharded(learner_keys, devices=learner_devices)
     actor_keys = jax.random.split(key, len(actor_devices) * args.num_actor_threads)
 
-    deck = init_ygopro(args.env_id, "english", args.deck, args.code_list_file)
+    deck, deck_names = init_ygopro(args.env_id, "english", args.deck, args.code_list_file, return_deck_names=True)
+    args.deck_names = sorted(deck_names)
     args.deck1 = args.deck1 or deck
     args.deck2 = args.deck2 or deck
 
@@ -911,11 +935,14 @@ def main():
             learn_opponent,
         )
         unreplicated_params = flax.jax_utils.unreplicate(agent_state.params)
+        params_queue_put_time = 0
         for d_idx, d_id in enumerate(args.actor_device_ids):
             device_params = jax.device_put(unreplicated_params, local_devices[d_id])
             device_params["params"]["Encoder_0"]['Embed_0']["embedding"].block_until_ready()
+            params_queue_put_start = time.time()
             for thread_id in range(args.num_actor_threads):
                 params_queues[d_idx * args.num_actor_threads + thread_id].put(device_params)
+            params_queue_put_time += time.time() - params_queue_put_start
 
         loss = loss[-1].item()
         if np.isnan(loss) or np.isinf(loss):
@@ -935,7 +962,8 @@ def main():
             print(
                 f"{tb_global_step} actor_update={update}, "
                 f"train_time={time.time() - training_time_start:.2f}, "
-                f"data_time={rollout_queue_get_time[-1]:.2f}"
+                f"data_time={rollout_queue_get_time[-1]:.2f}, "
+                f"put_time={params_queue_put_time:.2f}"
             )
             writer.add_scalar(
                 "charts/learning_rate", agent_state.opt_state[3][2][1].hyperparams["learning_rate"][-1].item(), tb_global_step

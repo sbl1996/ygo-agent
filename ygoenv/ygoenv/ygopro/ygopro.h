@@ -1245,6 +1245,7 @@ static ankerl::unordered_dense::map<std::string, std::vector<CardCode>>
 static ankerl::unordered_dense::map<std::string, std::vector<CardCode>>
     extra_decks_;
 static std::vector<std::string> deck_names_;
+static ankerl::unordered_dense::map<std::string, int> deck_names_ids_;
 
 inline const Card &c_get_card(CardCode code) {
   auto it = cards_.find(code);
@@ -1388,6 +1389,7 @@ static void init_module(const std::string &db_path,
     extra_decks_[name] = extra_deck;
     if (name[0] != '_') {
       deck_names_.push_back(name);
+      deck_names_ids_[name] = deck_names_.size() - 1;
     }
 
     preload_deck(db, main_deck);
@@ -1532,7 +1534,10 @@ public:
         "info:num_options"_.Bind(Spec<int>({}, {0, conf["max_options"_] - 1})),
         "info:to_play"_.Bind(Spec<int>({}, {0, 1})),
         "info:is_selfplay"_.Bind(Spec<int>({}, {0, 1})),
-        "info:win_reason"_.Bind(Spec<int>({}, {-1, 1})));
+        "info:win_reason"_.Bind(Spec<int>({}, {-1, 1})),
+        "info:step_time"_.Bind(Spec<double>({2})),
+        "info:deck"_.Bind(Spec<int>({2}))
+      );
   }
   template <typename Config>
   static decltype(auto) ActionSpec(const Config &conf) {
@@ -1655,6 +1660,10 @@ protected:
   double reset_time_3_ = 0;
   uint64_t reset_time_count_ = 0;
 
+  // average time for decks
+  ankerl::unordered_dense::map<std::string, double> deck_time_;
+  ankerl::unordered_dense::map<std::string, uint64_t> deck_time_count_;
+
   const int n_history_actions_;
 
   // circular buffer for history actions
@@ -1755,6 +1764,14 @@ public:
     time_stat = time_stat * (static_cast<double>(time_count) /
       (time_count + 1)) + seconds / (time_count + 1);
   }
+
+  // void update_time_stat(const std::string& deck, double seconds) {
+  //   uint64_t& time_count = deck_time_count_[deck];
+  //   double& time_stat = deck_time_[deck];
+  //   time_stat = time_stat * (static_cast<double>(time_count) /
+  //     (time_count + 1)) + seconds / (time_count + 1);
+  //   time_count++;
+  // }
 
   MDuel new_duel(uint32_t seed) {
     auto pduel = YGO_CreateDuel(seed);
@@ -2177,7 +2194,7 @@ public:
   }
 
   void Step(const Action &action) override {
-    // clock_t start = clock();
+    clock_t start = clock();
 
     int idx = action["action"_];
     callback_(idx);
@@ -2250,10 +2267,25 @@ public:
       }
     }
 
-    WriteState(reward, win_reason_);
 
-    // update_time_stat(start, step_time_count_, step_time_);
-    // step_time_count_++;
+    update_time_stat(start, step_time_count_, step_time_);
+    step_time_count_++;
+
+    double step_time = 0;
+    if (done_) {
+      step_time = step_time_;
+      step_time_ = 0;
+      step_time_count_ = 0;
+    }
+
+    WriteState(reward, win_reason_, step_time);
+
+    // if (done_) {
+    //   update_time_stat(deck_name_[0], step_time_);
+    //   update_time_stat(deck_name_[1], step_time_);
+    //   step_time_ = 0;
+    //   step_time_count_ = 0;
+    // }
     // if (step_time_count_ % 3000 == 0) {
     //   fmt::println("Step time: {:.3f}", step_time_ * 1000);
     // }
@@ -2662,7 +2694,7 @@ private:
 
   // ygopro-core API
 
-  void WriteState(float reward, int win_reason = 0) {
+  void WriteState(float reward, int win_reason = 0, double step_time = 0.0) {
     State state = Allocate();
 
     int n_options = legal_actions_.size();
@@ -2670,6 +2702,12 @@ private:
     state["info:to_play"_] = int(to_play_);
     state["info:is_selfplay"_] = int(play_mode_ == kSelfPlay);
     state["info:win_reason"_] = win_reason;
+    if (reward != 0.0) {
+      state["info:step_time"_][0] = step_time;
+      state["info:step_time"_][1] = step_time;
+      state["info:deck"_][0] = deck_names_ids_[deck_name_[0]];
+      state["info:deck"_][1] = deck_names_ids_[deck_name_[1]];
+    }
 
     if (n_options == 0) {
       state["info:num_options"_] = 1;
