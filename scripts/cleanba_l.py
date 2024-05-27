@@ -144,6 +144,13 @@ class Args:
     max_grad_norm: float = 1.0
     """the maximum norm for the gradient clipping"""
 
+    use_op_policy: bool = False
+    """whether to use the opponent's trajectory for policy update"""
+    use_op_value: bool = False
+    """whether to use the opponent's trajectory for value update"""
+    sp_ratio: float = 0.5
+    """the ratio of the self-play games"""
+
     m1: ModelArgs = field(default_factory=lambda: ModelArgs())
     """the model arguments for the agent"""
     m2: ModelArgs = field(default_factory=lambda: ModelArgs())
@@ -310,15 +317,25 @@ def rollout(
 
     @jax.jit
     def sample_action(
-        params, next_obs, rstate1, rstate2, main, done, key):
+        params, params_t, next_obs,
+        rstate1, rstate2, rstate_t1, rstate_t2,
+        main, done, key):
         next_obs = jax.tree.map(lambda x: jnp.array(x), next_obs)
         done = jnp.array(done)
         main = jnp.array(main)
 
         (rstate1, rstate2), logits = agent.apply(
             params, next_obs, (rstate1, rstate2), done, main)[:2]
+        (rstate_t1, rstate_t2), logits_t = agent.apply(
+            params_t, next_obs, (rstate_t1, rstate_t2), done, main)[:2]
+
+        N = logits.shape[0]        
+        sp_mask = jnp.arange(N) < int(N * args.sp_ratio)
+        logits_t = jnp.where(sp_mask[:, None], logits, logits_t)
+
+        logits = jnp.where(main[:, None], logits, logits_t)
         action, key = categorical_sample(logits, key)
-        return next_obs, done, main, rstate1, rstate2, action, logits, key
+        return next_obs, done, main, rstate1, rstate2, rstate_t1, rstate_t2, action, logits, key
 
     deck_names = args.deck_names
     deck_avg_times = {name: 0 for name in deck_names}
@@ -348,6 +365,9 @@ def rollout(
     def prepare_data(storage: List[Transition]) -> Transition:
         return jax.tree.map(lambda *xs: jnp.split(jnp.stack(xs), len(learner_devices), axis=1), *storage)
 
+    params_t = None
+    next_rstate_t1 = next_rstate_t2 = next_rstate1
+
     for update in range(1, args.num_updates + 2):
         if update == 10:
             start_time = time.time()
@@ -367,6 +387,9 @@ def rollout(
             actor_policy_version += 1
         params_queue_get_time.append(time.time() - params_queue_get_time_start)
 
+        if params_t is None:
+            params_t = params
+
         rollout_time_start = time.time()
         init_rstate1, init_rstate2 = jax.tree.map(
             lambda x: x.copy(), (next_rstate1, next_rstate2))
@@ -379,9 +402,10 @@ def rollout(
 
             inference_time_start = time.time()
             cached_next_obs, cached_next_done, cached_main, \
-                next_rstate1, next_rstate2, action, logits, key = sample_action(
-                params, cached_next_obs, next_rstate1, next_rstate2, main, cached_next_done, key)
-            
+                next_rstate1, next_rstate2, next_rstate_t1, next_rstate_t2, \
+                    action, logits, key = sample_action(
+                    params, params_t, cached_next_obs, next_rstate1, next_rstate2,
+                    next_rstate_t1, next_rstate_t2, main, cached_next_done, key)
             cpu_action = np.array(action)
             inference_time += time.time() - inference_time_start
 
@@ -670,7 +694,8 @@ def main():
 
     def loss_fn(
         params, rstate1, rstate2, obs, dones, next_dones,
-        switch_or_mains, actions, logits, rewards, mask, next_value):
+        switch_or_mains, actions, logits, rewards, mask,
+        next_value, no_op_mask):
         # (num_steps * local_num_envs // n_mb))
         num_envs = next_value.shape[0]
         num_steps = dones.shape[0] // num_envs
@@ -734,6 +759,13 @@ def main():
 
         ent_loss = entropy_loss(new_logits)
 
+        mains = no_op_mask.astype(jnp.float32)
+        if not args.use_op_policy:
+            pg_loss = pg_loss * mains
+            ent_loss = ent_loss * mains
+        if not args.use_op_value:
+            v_loss = v_loss * mains
+
         if args.burn_in_steps:
             mask = jax.tree.map(
                 lambda x: x.reshape(num_steps, num_envs), mask)
@@ -778,6 +810,9 @@ def main():
             switch = T[:, None] == (switch_steps[None, :] - 1)
             storage = jax.tree.map(lambda x: x[indices, B[None, :]], storage)
 
+        no_op_mask = jnp.arange(num_envs) < int(num_envs * args.sp_ratio)
+        no_op_mask = jnp.logical_or(storage.mains, no_op_mask[None, :])
+
         loss_grad_fn = jax.value_and_grad(loss_fn, has_aux=True)
 
         def update_epoch(carry, _):
@@ -812,6 +847,7 @@ def main():
                 switch_or_mains = convert_data(switch, num_steps)
             else:
                 switch_or_mains = shuffled_storage.mains
+                shuffled_no_op_mask = convert_data(no_op_mask, num_steps)
             shuffled_mask = jnp.ones_like(shuffled_storage.mains)
 
             def update_minibatch(agent_state, minibatch):
@@ -836,6 +872,7 @@ def main():
                     shuffled_storage.rewards,
                     shuffled_mask,
                     shuffled_next_value,
+                    shuffled_no_op_mask,
                 ),
             )
             return (agent_state, key), (loss, pg_loss, v_loss, ent_loss, approx_kl)
