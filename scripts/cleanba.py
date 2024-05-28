@@ -596,11 +596,16 @@ def main():
         args.ckpt_dir, save_fn, n_saved=2)
 
     # seeding
-    seed_offset = args.local_rank
-    args.seed += seed_offset
     random.seed(args.seed)
+    seed = random.randint(0, 1e8)
+
+    seed_offset = args.local_rank
+    seed += seed_offset
+    init_key = jax.random.PRNGKey(seed - seed_offset)
+
+    random.seed(seed)
     args.real_seed = random.randint(0, 1e8)
-    init_key = jax.random.PRNGKey(args.seed - seed_offset)
+
     key = jax.random.PRNGKey(args.real_seed)
     key, *learner_keys = jax.random.split(key, len(learner_devices) + 1)
     learner_keys = jax.device_put_sharded(learner_keys, devices=learner_devices)

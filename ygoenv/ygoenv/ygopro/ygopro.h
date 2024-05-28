@@ -1501,7 +1501,13 @@ public:
       if (input == "quit") {
         exit(0);
       }
-      int idx = std::stoi(input) - 1;
+      int idx = -1;
+      try {
+        idx = std::stoi(input) - 1;
+      } catch (std::invalid_argument &e) {
+        fmt::println("{} Invalid input: {}", duel_player_, input);
+        continue;
+      }
       if (idx >= 0 && idx < actions.size()) {
         return idx;
       } else {
@@ -1720,6 +1726,7 @@ public:
         throw std::runtime_error("record mode must be used with verbose mode and num_envs=1");
       }
     }
+    fmt::println("env_id: {}, seed: {}, x: {}", env_id_, seed_, dist_int_(gen_));
 
     duel_gen_ = std::mt19937(dist_int_(gen_));
 
@@ -4158,10 +4165,13 @@ private:
         for (const auto &card : cards) {
           auto spec = card.get_spec(player);
           specs.push_back(spec);
+          int i = specs.size();
           if (card.controler_ != player && card.position_ & POS_FACEDOWN) {
-            pl->notify(spec + ": " + card.get_position() + " card");
+            pl->notify(
+              fmt::format("{}: {} card ({})", i, card.get_position(), spec));
           } else {
-            pl->notify(spec + ": " + card.name_);
+            pl->notify(
+              fmt::format("{}: {} ({})", i, card.name_, spec));
           }
         }
       } else {
@@ -4242,7 +4252,8 @@ private:
         for (const auto &card : cards) {
           auto spec = card.get_spec(player);
           specs.push_back(spec);
-          pl->notify(spec + ": " + card.name_);
+          pl->notify(
+            fmt::format("{}: {} ({})", specs.size(), card.name_, spec));
         }
       } else {
         for (int i = 0; i < size; ++i) {
@@ -4369,7 +4380,8 @@ private:
         for (const auto &card : select) {
           auto spec = card.get_spec(player);
           select_specs.push_back(spec);
-          pl->notify(spec + ": " + card.name_);
+          pl->notify(
+            fmt::format("{}: {} ({})", select_specs.size(), card.name_, spec));
         }
       } else {
         for (int i = 0; i < select_size; ++i) {
