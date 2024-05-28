@@ -1726,7 +1726,7 @@ public:
         throw std::runtime_error("record mode must be used with verbose mode and num_envs=1");
       }
     }
-    fmt::println("env_id: {}, seed: {}, x: {}", env_id_, seed_, dist_int_(gen_));
+    // fmt::println("env_id: {}, seed: {}, x: {}", env_id_, seed_, dist_int_(gen_));
 
     duel_gen_ = std::mt19937(dist_int_(gen_));
 
