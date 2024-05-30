@@ -95,6 +95,8 @@ class Args:
     """the number of actor threads to use"""
     num_steps: int = 128
     """the number of steps to run in each environment per policy rollout"""
+    segment_length: Optional[int] = None
+    """the length of the segment for training"""
     anneal_lr: bool = False
     """Toggle learning rate annealing for policy and value networks"""
     gamma: float = 1.0
@@ -245,6 +247,53 @@ def init_rnn_state(num_envs, rnn_channels):
         np.zeros((num_envs, rnn_channels)),
         np.zeros((num_envs, rnn_channels)),
     )
+
+
+def reshape_minibatch(
+    x, multi_step, num_minibatches, num_steps, segment_length=None, key=None):
+    # if segment_length is None,
+    #   n_mb = num_minibatches
+    #   if multi_step, from (num_steps, num_envs, ...)) to
+    #     (n_mb, num_steps * (num_envs // n_mb), ...)
+    #   else, from (num_envs, ...) to
+    #     (n_mb, num_envs // n_mb, ...)
+    # else,
+    #   n_mb_t = num_steps // segment_length
+    #   n_mb_e = num_minibatches // num_minibatches1
+    #   if multi_step, from (num_steps, num_envs, ...)) to
+    #     (n_mb_e, n_mb_t, segment_length * (num_envs // n_mb_e), ...)
+    #   else, from (num_envs, ...) to
+    #     (n_mb_e, num_envs // n_mb_e, ...)
+    if key is not None:
+        x = jax.random.permutation(key, x, axis=1 if multi_step else 0)
+
+    N = num_minibatches
+    if segment_length is None:
+        if multi_step:
+            x = jnp.reshape(x, (num_steps, N, -1) + x.shape[2:])
+            x = x.transpose(1, 0, *range(2, x.ndim))
+            x = x.reshape(N, -1, *x.shape[3:])
+        else:
+            x = jnp.reshape(x, (N, -1) + x.shape[1:])
+    else:
+        M = segment_length
+        Nt = num_steps // M
+        Ne = N // Nt
+        if multi_step:
+            x = jnp.reshape(x, (Nt, M, Ne, -1) + x.shape[2:])
+            x = x.transpose(2, 0, 1, *range(3, x.ndim))
+            x = jnp.reshape(x, (Ne, Nt, -1) + x.shape[4:])
+        else:
+            x = jnp.reshape(x, (Ne, -1) + x.shape[1:])
+    return x
+
+
+def reshape_batch(x, num_minibatches, num_steps, segment_length=None):
+    N = num_minibatches
+    x = jnp.reshape(x, (N, num_steps, -1) + x.shape[2:])
+    x = x.transpose(1, 0, *range(2, x.ndim))
+    x = jnp.reshape(x, (num_steps, -1) + x.shape[3:])
+    return x
 
 
 def rollout(
@@ -539,6 +588,8 @@ def main():
     args.minibatch_size = args.local_minibatch_size * args.world_size
     args.num_updates = args.total_timesteps // (args.local_batch_size * args.world_size)
     args.local_env_threads = args.local_env_threads or args.local_num_envs
+    if args.segment_length is not None:
+        assert args.num_steps % args.segment_length == 0, "num_steps must be divisible by segment_length"
 
     if args.embedding_file:
         embeddings = load_embeddings(args.embedding_file, args.code_list_file)
@@ -675,29 +726,17 @@ def main():
     else:
         eval_params = None
 
-    def loss_fn(
-        params, rstate1, rstate2, obs, dones, next_dones,
-        switch_or_mains, actions, logits, rewards, mask, next_value):
-        # (num_steps * local_num_envs // n_mb))
+    def advantage_fn(
+            new_logits, new_values, next_dones, switch_or_mains,
+            actions, logits, rewards, next_value):
         num_envs = next_value.shape[0]
-        num_steps = dones.shape[0] // num_envs
+        num_steps = next_dones.shape[0] // num_envs
 
         def reshape_time_series(x):
             return jnp.reshape(x, (num_steps, num_envs) + x.shape[1:])
 
-        mask = mask * (1.0 - dones)
-
-        if args.switch:
-            dones = dones | next_dones
-
-        new_logits, new_values = create_agent(args).apply(
-            params, obs, (rstate1, rstate2), dones, switch_or_mains)[1:3]
-        new_values = new_values.squeeze(-1)
-
         ratios = distrax.importance_sampling_ratios(distrax.Categorical(
             new_logits), distrax.Categorical(logits), actions)
-        logratio = jnp.log(ratios)
-        approx_kl = (ratios - 1) - logratio
 
         new_values_, rewards, next_dones, switch_or_mains = jax.tree.map(
             reshape_time_series, (new_values, rewards, next_dones, switch_or_mains),
@@ -717,6 +756,15 @@ def main():
 
         target_values, advantages = jax.tree.map(
             lambda x: jnp.reshape(x, (-1,)), (target_values, advantages))
+        return target_values, advantages
+
+    def loss_fn(
+        new_logits, new_values, actions, logits, target_values, advantages,
+        mask, num_steps=None):
+        ratios = distrax.importance_sampling_ratios(distrax.Categorical(
+            new_logits), distrax.Categorical(logits), actions)
+        logratio = jnp.log(ratios)
+        approx_kl = (ratios - 1) - logratio
 
         if args.norm_adv:
             advantages = masked_normalize(advantages, mask, eps=1e-8)
@@ -743,7 +791,7 @@ def main():
 
         if args.burn_in_steps:
             mask = jax.tree.map(
-                lambda x: x.reshape(num_steps, num_envs), mask)
+                lambda x: x.reshape(num_steps, -1), mask)
             burn_in_mask = jnp.arange(num_steps) < args.burn_in_steps
             mask = jnp.where(burn_in_mask[:, None], 0.0, mask)
             mask = jnp.reshape(mask, (-1,))
@@ -754,7 +802,57 @@ def main():
 
         loss = pg_loss - args.ent_coef * ent_loss + v_loss * args.vf_coef
         loss = jnp.where(jnp.isnan(loss) | jnp.isinf(loss), 0.0, loss)
-        return loss, (pg_loss, v_loss, ent_loss, jax.lax.stop_gradient(approx_kl))
+        return loss, pg_loss, v_loss, ent_loss, approx_kl
+
+    def apply_fn(params, obs, rstate1, rstate2, dones, next_dones, switch_or_mains):
+        if args.switch:
+            dones = dones | next_dones
+        (rstate1, rstate2), new_logits, new_values = create_agent(args).apply(
+            params, obs, (rstate1, rstate2), dones, switch_or_mains)[:3]
+        new_values = new_values.squeeze(-1)
+        return (rstate1, rstate2), new_logits, new_values
+
+    def compute_advantage(
+        params, rstate1, rstate2, obs, dones, next_dones,
+        switch_or_mains, actions, logits, rewards, next_value):
+        new_logits, new_values = apply_fn(
+            params, obs, rstate1, rstate2, dones, next_dones, switch_or_mains)[1:3]
+
+        target_values, advantages = advantage_fn(
+            new_logits, new_values, next_dones, switch_or_mains,
+            actions, logits, rewards, next_value)
+        return target_values, advantages
+
+    def compute_loss(
+        params, rstate1, rstate2, obs, dones, next_dones,
+        switch_or_mains, actions, logits, target_values, advantages, mask):
+        (rstate1, rstate2), new_logits, new_values = apply_fn(
+            params, obs, rstate1, rstate2, dones, next_dones, switch_or_mains)
+
+        loss, pg_loss, v_loss, ent_loss, approx_kl = loss_fn(
+            new_logits, new_values, actions, logits, target_values, advantages,
+            mask, num_steps=None)
+
+        approx_kl, rstate1, rstate2 = jax.tree.map(
+            jax.lax.stop_gradient, (approx_kl, rstate1, rstate2))
+        return loss, (pg_loss, v_loss, ent_loss, approx_kl, rstate1, rstate2)
+
+    def compute_advantage_loss(
+        params, rstate1, rstate2, obs, dones, next_dones,
+        switch_or_mains, actions, logits, rewards, next_value, mask):
+        new_logits, new_values = apply_fn(
+            params, obs, rstate1, rstate2, dones, next_dones, switch_or_mains)[1:3]
+
+        target_values, advantages = advantage_fn(
+            new_logits, new_values, next_dones, switch_or_mains,
+            actions, logits, rewards, next_value)
+
+        loss, pg_loss, v_loss, ent_loss, approx_kl = loss_fn(
+            new_logits, new_values, actions, logits, target_values, advantages,
+            mask, num_steps=dones.shape[0] // next_value.shape[0])
+
+        approx_kl = jax.lax.stop_gradient(approx_kl)
+        return loss, (pg_loss, v_loss, ent_loss, approx_kl)
 
     def single_device_update(
         agent_state: TrainState,
@@ -785,7 +883,45 @@ def main():
             switch = T[:, None] == (switch_steps[None, :] - 1)
             storage = jax.tree.map(lambda x: x[indices, B[None, :]], storage)
 
-        loss_grad_fn = jax.value_and_grad(loss_fn, has_aux=True)
+        if args.segment_length is None:
+            loss_grad_fn = jax.value_and_grad(compute_advantage_loss, has_aux=True)
+        else:
+            loss_grad_fn = jax.value_and_grad(compute_loss, has_aux=True)
+
+        def compute_advantage_t(next_value):
+            N = args.num_minibatches // 4
+            def convert_data1(x: jnp.ndarray, multi_step=True):
+                return reshape_minibatch(x, multi_step, N, num_steps)
+
+            b_init_rstate1, b_init_rstate2, b_next_value = jax.tree.map(
+                partial(convert_data1, multi_step=False), (init_rstate1, init_rstate2, next_value))
+            b_storage = jax.tree.map(convert_data1, storage)
+            if args.switch:
+                b_switch_or_mains = convert_data1(switch)
+            else:
+                b_switch_or_mains = b_storage.mains
+
+            target_values, advantages = jax.lax.scan(
+                lambda x, y: (x, compute_advantage(x, *y)),
+                agent_state.params,
+                (
+                    b_init_rstate1,
+                    b_init_rstate2,
+                    b_storage.obs,
+                    b_storage.dones,
+                    b_storage.next_dones,
+                    b_switch_or_mains,
+                    b_storage.actions,
+                    b_storage.logits,
+                    b_storage.rewards,
+                    b_next_value,
+                ))[1]
+            print(jax.tree.map(lambda x: x.shape, (b_storage.dones, target_values, advantages)))
+
+            target_values, advantages = jax.tree.map(
+                partial(reshape_batch, num_minibatches=N, num_steps=num_steps),
+                (target_values, advantages))
+            return target_values, advantages
 
         def update_epoch(carry, _):
             agent_state, key = carry
@@ -798,36 +934,51 @@ def main():
             else:
                 next_value = jnp.where(next_main, next_value, -next_value)
 
-            def convert_data(x: jnp.ndarray, num_steps):
-                if args.update_epochs > 1:
-                    x = jax.random.permutation(subkey, x, axis=1 if num_steps > 1 else 0)
-                N = args.num_minibatches
-                if num_steps > 1:
-                    x = jnp.reshape(x, (num_steps, N, -1) + x.shape[2:])
-                    x = x.transpose(1, 0, *range(2, x.ndim))
-                    x = x.reshape(N, -1, *x.shape[3:])
-                else:
-                    x = jnp.reshape(x, (N, -1) + x.shape[1:])
-                return x
+            def convert_data(x: jnp.ndarray, multi_step=True):
+                key = subkey if args.update_epochs > 1 else None
+                return reshape_minibatch(
+                    x, multi_step, args.num_minibatches, num_steps, args.segment_length, key=key)
 
-            shuffled_init_rstate1, shuffled_init_rstate2, \
-                shuffled_next_value = jax.tree.map(
-                partial(convert_data, num_steps=1), (init_rstate1, init_rstate2, next_value))
-            shuffled_storage = jax.tree.map(
-                partial(convert_data, num_steps=num_steps), storage)
+
+            shuffled_init_rstate1, shuffled_init_rstate2 = jax.tree.map(
+                partial(convert_data, multi_step=False), (init_rstate1, init_rstate2))
+            shuffled_storage = jax.tree.map(convert_data, storage)
             if args.switch:
-                switch_or_mains = convert_data(switch, num_steps)
+                switch_or_mains = convert_data(switch)
             else:
                 switch_or_mains = shuffled_storage.mains
-            shuffled_mask = jnp.ones_like(shuffled_storage.mains)
+            shuffled_mask = ~shuffled_storage.dones
 
-            def update_minibatch(agent_state, minibatch):
-                (loss, (pg_loss, v_loss, ent_loss, approx_kl)), grads = loss_grad_fn(
-                    agent_state.params, *minibatch)
-                grads = jax.lax.pmean(grads, axis_name="local_devices")
-                agent_state = agent_state.apply_gradients(grads=grads)
-                return agent_state, (loss, pg_loss, v_loss, ent_loss, approx_kl)
+            if args.segment_length is None:
+                shuffled_next_value = convert_data(next_value, multi_step=False)
+                others = shuffled_storage.rewards, shuffled_next_value, shuffled_mask
+                def update_minibatch(agent_state, minibatch):
+                    (loss, (pg_loss, v_loss, ent_loss, approx_kl)), grads = loss_grad_fn(
+                        agent_state.params, *minibatch)
+                    grads = jax.lax.pmean(grads, axis_name="local_devices")
+                    agent_state = agent_state.apply_gradients(grads=grads)
+                    return agent_state, (loss, pg_loss, v_loss, ent_loss, approx_kl)
+            else:
+                target_values, advantages = compute_advantage_t(next_value)
+                shuffled_target_values, shuffled_advantages = jax.tree.map(
+                    convert_data, (target_values, advantages))
+                others = shuffled_target_values, shuffled_advantages, shuffled_mask
+                def update_minibatch(agent_state, minibatch):
+                    def update_minibatch_t(carry, minibatch_t):
+                        agent_state, rstate1, rstate2 = carry
+                        minibatch_t = rstate1, rstate2, *minibatch_t
+                        (loss, (pg_loss, v_loss, ent_loss, approx_kl, rstate1, rstate2)), \
+                            grads = loss_grad_fn(agent_state.params, *minibatch_t)
+                        grads = jax.lax.pmean(grads, axis_name="local_devices")
+                        agent_state = agent_state.apply_gradients(grads=grads)
+                        return (agent_state, rstate1, rstate2), (loss, pg_loss, v_loss, ent_loss, approx_kl)
 
+                    rstate1, rstate2, *minibatch_t = minibatch
+                    (agent_state, _rstate1, _rstate2), \
+                        (loss, pg_loss, v_loss, ent_loss, approx_kl) = jax.lax.scan(
+                        update_minibatch_t, (agent_state, rstate1, rstate2), minibatch_t)
+                    return agent_state, (loss, pg_loss, v_loss, ent_loss, approx_kl)
+      
             agent_state, (loss, pg_loss, v_loss, ent_loss, approx_kl) = jax.lax.scan(
                 update_minibatch,
                 agent_state,
@@ -840,9 +991,7 @@ def main():
                     switch_or_mains,
                     shuffled_storage.actions,
                     shuffled_storage.logits,
-                    shuffled_storage.rewards,
-                    shuffled_mask,
-                    shuffled_next_value,
+                    *others,
                 ),
             )
             return (agent_state, key), (loss, pg_loss, v_loss, ent_loss, approx_kl)
