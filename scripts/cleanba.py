@@ -916,7 +916,6 @@ def main():
                     b_storage.rewards,
                     b_next_value,
                 ))[1]
-            print(jax.tree.map(lambda x: x.shape, (b_storage.dones, target_values, advantages)))
 
             target_values, advantages = jax.tree.map(
                 partial(reshape_batch, num_minibatches=N, num_steps=num_steps),
