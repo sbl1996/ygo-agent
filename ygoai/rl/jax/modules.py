@@ -60,7 +60,6 @@ class GLUMlp(nn.Module):
     dtype: Optional[jnp.dtype] = None
     param_dtype: jnp.dtype = jnp.float32
     kernel_init: nn.initializers.Initializer = nn.initializers.lecun_normal()
-    last_kernel_init: nn.initializers.Initializer = nn.initializers.lecun_normal()
     use_bias: bool = False
 
     @nn.compact
@@ -73,7 +72,6 @@ class GLUMlp(nn.Module):
                 dtype=self.dtype,
                 param_dtype=self.param_dtype,
                 kernel_init=self.kernel_init,
-                bias_init=self.bias_init,
             ) for _ in range(3)
         ]
 
