@@ -57,6 +57,7 @@ class MLP(nn.Module):
 
 class GLUMlp(nn.Module):
     intermediate_size: int
+    output_size: Optional[int] = None
     dtype: Optional[jnp.dtype] = None
     param_dtype: jnp.dtype = jnp.float32
     kernel_init: nn.initializers.Initializer = nn.initializers.lecun_normal()
@@ -74,8 +75,7 @@ class GLUMlp(nn.Module):
                 kernel_init=self.kernel_init,
             ) for _ in range(3)
         ]
-
-        actual_out_dim = inputs.shape[-1]
+        output_size = self.output_size or inputs.shape[-1]
         g = dense[0](
             features=self.intermediate_size,
             name="gate",
@@ -86,7 +86,7 @@ class GLUMlp(nn.Module):
             name="up",
         )(inputs)
         x = dense[2](
-            features=actual_out_dim,
+            features=output_size,
             name="down",
         )(x)
         return x

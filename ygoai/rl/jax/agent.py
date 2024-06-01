@@ -406,7 +406,12 @@ class Encoder(nn.Module):
 
             f_state = jnp.concatenate(g_feats, axis=-1)
         oc = self.out_channels or c
-        f_state = MLP((c * 2, oc), dtype=self.dtype, param_dtype=self.param_dtype)(f_state)
+        if self.version == 2:
+            f_state = GLUMlp(
+                intermediate_size=c * 2, output_size=oc,
+                dtype=self.dtype, param_dtype=self.param_dtype)(f_state)
+        else:
+            f_state = MLP((c * 2, oc), dtype=self.dtype, param_dtype=self.param_dtype)(f_state)
         f_state = layer_norm(dtype=self.dtype)(f_state)
         return f_actions, f_state, a_mask, valid
 
