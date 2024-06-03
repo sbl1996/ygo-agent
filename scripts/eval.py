@@ -210,17 +210,17 @@ if __name__ == "__main__":
         for idx, d in enumerate(dones):
             if not d:
                 continue
-            for i in range(2):
-                deck_time = infos['step_time'][idx][i]
-                deck_name = deck_names[infos['deck'][idx][i]]
+            # for i in range(2):
+            #     deck_time = infos['step_time'][idx][i]
+            #     deck_name = deck_names[infos['deck'][idx][i]]
 
-                time_count = deck_time_count[deck_name]
-                avg_time = deck_times[deck_name]
-                avg_time = avg_time * (time_count / (time_count + 1)) + deck_time / (time_count + 1)
-                deck_times[deck_name] = avg_time
-                deck_time_count[deck_name] += 1
-                if deck_time_count[deck_name] % 100 == 0:
-                    print(f"Deck {deck_name}: {avg_time:.4f}")
+            #     time_count = deck_time_count[deck_name]
+            #     avg_time = deck_times[deck_name]
+            #     avg_time = avg_time * (time_count / (time_count + 1)) + deck_time / (time_count + 1)
+            #     deck_times[deck_name] = avg_time
+            #     deck_time_count[deck_name] += 1
+            #     if deck_time_count[deck_name] % 100 == 0:
+            #         print(f"Deck {deck_name}: {avg_time:.4f}")
 
             win_reason = infos['win_reason'][idx]
             episode_length = infos['l'][idx]

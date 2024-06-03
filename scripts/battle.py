@@ -153,7 +153,7 @@ if __name__ == "__main__":
         play_mode='self',
         async_reset=False,
         verbose=args.verbose,
-        record=args.record,        
+        record=args.record,
     )
     envs1 = ygoenv.make(
         task_id=env_id1,
@@ -311,6 +311,7 @@ if __name__ == "__main__":
         for idx, d in enumerate(dones1):
             if not d or (args.accurate and collected[idx]):
                 continue
+            # c1 = collected[idx]
             collected[idx] = True
             win_reason = infos1['win_reason'][idx]
             pl = 1 if main[idx] else -1
@@ -323,7 +324,8 @@ if __name__ == "__main__":
             win_players.append(win_player)
             win_agent = 1 if main_reward > 0 else 2
             win_agents.append(win_agent)
-            # print(f"{len(episode_lengths)}: {episode_length}, {main_reward}")
+            # if not c1:
+            #     print(f"{len(episode_lengths)}: {episode_length}, {main_reward}")
             episode_lengths.append(episode_length)
             episode_rewards.append(main_reward)
             win_rates.append(win)

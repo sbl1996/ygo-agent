@@ -49,6 +49,8 @@ class Args:
     """the frequency of saving the model (in terms of `updates`)"""
     checkpoint: Optional[str] = None
     """the path to the model checkpoint to load"""
+    timeout: int = 600
+    """the timeout of the environment step"""
     debug: bool = False
     """whether to run the script in debug mode"""
 
@@ -208,6 +210,7 @@ def make_env(args, seed, num_envs, num_threads, mode='self', thread_affinity_off
         async_reset=False,
         greedy_reward=args.greedy_reward if not eval else True,
         play_mode=mode,
+        timeout=args.timeout,
     )
     envs.num_envs = num_envs
     return envs
