@@ -336,7 +336,7 @@ def rollout(
 ):
     eval_mode = 'self' if args.eval_checkpoint else 'bot'
     if eval_mode != 'bot':
-        eval_params, params_rt = params_queue.get()
+        params_rt, eval_params = params_queue.get()
     else:
         params_rt, = params_queue.get()
 

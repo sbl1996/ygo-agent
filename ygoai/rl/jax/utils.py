@@ -37,10 +37,11 @@ class RunningMeanStd(struct.PyTreeNode):
 
     @classmethod
     def create(cls, shape=()):
+        # TODO: use numpy and float64
         return cls(
-            mean=jnp.zeros(shape, "float64"),
-            var=jnp.ones(shape, "float64"),
-            count=jnp.full(shape, 1e-4, "float64"),
+            mean=jnp.zeros(shape, "float32"),
+            var=jnp.ones(shape, "float32"),
+            count=jnp.full(shape, 1e-4, "float32"),
         )
 
     def update(self, x):
