@@ -107,15 +107,15 @@ def get_from_action(values, action):
     return jnp.sum(distrax.multiply_no_nan(values, value_one_hot), axis=-1)
 
 
-def mean_legal(values, axis=None):
+def mean_legal(values, axis=None, keepdims=False):
     # TODO: use real action mask
     no_nan_mask = values > -1e12
     no_nan = jnp.where(no_nan_mask, values, 0)
-    count = jnp.sum(no_nan_mask, axis=axis)
-    return jnp.sum(no_nan, axis=axis) / jnp.maximum(count, 1)
+    count = jnp.sum(no_nan_mask, axis=axis, keepdims=keepdims)
+    return jnp.sum(no_nan, axis=axis, keepdims=keepdims) / jnp.maximum(count, 1)
 
 
-def neurd_loss(actions, logits, new_logits, advantages, logits_threshold):
+def neurd_loss_2(actions, logits, new_logits, advantages, logits_threshold):
     # Neural Replicator Dynamics
     # Differences from the original implementation:
     # - all actions vs. sampled actions
@@ -133,6 +133,27 @@ def neurd_loss(actions, logits, new_logits, advantages, logits_threshold):
         advs >= 0, can_decrease_1, can_decrease_2).astype(jnp.float32)
     c = jax.lax.stop_gradient(c)
     pg_loss = -c * new_logits_a_ / probs_a * advs
+    return pg_loss
+
+
+def neurd_loss(new_logits, advantages, logits_threshold=2.0, adv_threshold=1000.0):
+    advs = jax.lax.stop_gradient(advantages)
+
+    legal_mask = new_logits > -1e12
+    legal_logits = jnp.where(legal_mask, new_logits, 0)
+    count = jnp.sum(legal_mask, axis=-1, keepdims=True)
+    new_logits_ = new_logits - jnp.sum(legal_logits, axis=-1, keepdims=True) / jnp.maximum(count, 1)
+
+    can_increase = new_logits_ < logits_threshold
+    can_decrease = new_logits_ > -logits_threshold
+    c = jnp.where(
+        advs >= 0, can_increase, can_decrease).astype(jnp.float32)
+    c = jax.lax.stop_gradient(c)
+    advs = jnp.clip(advs, -adv_threshold, adv_threshold)
+    # TODO: renormalize with player
+    pg_loss = -c * new_logits_ * advs
+    pg_loss = jnp.where(legal_mask, pg_loss, 0)
+    pg_loss = jnp.sum(pg_loss, axis=-1)
     return pg_loss
 
 
@@ -158,7 +179,83 @@ def ach_loss(actions, logits, new_logits, advantages, logits_threshold, clip_coe
     return pg_loss
 
 
-def vtrace_loop(carry, inp, gamma, rho_min, rho_max, c_min, c_max):
+def vtrace_rnad_loop(carry, inp, gamma, rho_min, rho_max, c_min, c_max):
+    v1, v2, next_values1, next_values2, reward1, reward2, xi1, xi2, reward_u1, reward_u2 = carry
+    ratio, cur_values, r_t, eta_reg_entropy, probs, a_t, eta_log_policy, next_done, main = inp
+
+    v1 = jnp.where(next_done, 0, v1)
+    v2 = jnp.where(next_done, 0, v2)
+    next_values1 = jnp.where(next_done, 0, next_values1)
+    next_values2 = jnp.where(next_done, 0, next_values2)
+    reward1 = jnp.where(next_done, 0, reward1)
+    reward2 = jnp.where(next_done, 0, reward2)
+    xi1 = jnp.where(next_done, 1, xi1)
+    xi2 = jnp.where(next_done, 1, xi2)
+    reward_u1 = jnp.where(next_done, 0, reward_u1)
+    reward_u2 = jnp.where(next_done, 0, reward_u2)
+
+    discount = gamma * (1.0 - next_done)
+    next_v = jnp.where(main, v1, v2)
+    next_values = jnp.where(main, next_values1, next_values2)
+    reward = jnp.where(main, reward1, reward2)
+    xi = jnp.where(main, xi1, xi2)
+    reward_u = jnp.where(main, reward_u1, reward_u2)
+    
+    reward_u = r_t + discount * reward_u + eta_reg_entropy
+    discounted_reward = r_t + discount * reward
+
+    rho_t = jnp.clip(ratio * xi, rho_min, rho_max)
+    c_t = jnp.clip(ratio * xi, c_min, c_max)
+    sig_v = rho_t * (reward_u + discount * next_values - cur_values)
+    v = cur_values + sig_v + c_t * discount * (next_v - next_values)
+
+    q_t = cur_values[:, None] + eta_log_policy
+    n_actions = eta_log_policy.shape[-1]
+    q_t2 = discounted_reward + discount * xi * next_v - cur_values
+    q_t = q_t + q_t2[:, None] * distrax.multiply_no_nan(
+        1.0 / jnp.maximum(probs, 1e-3), jax.nn.one_hot(a_t, n_actions))
+
+    v1 = jnp.where(main, v, discount * v1)
+    v2 = jnp.where(main, discount * v2, v)
+    next_values1 = jnp.where(main, cur_values, discount * next_values1)
+    next_values2 = jnp.where(main, discount * next_values2, cur_values)
+    reward1 = jnp.where(main, 0, ratio * (discount * reward1 - r_t) - eta_reg_entropy)
+    reward2 = jnp.where(main, ratio * (discount * reward2 - r_t) - eta_reg_entropy, 0)
+    xi1 = jnp.where(main, 1, ratio * xi1)
+    xi2 = jnp.where(main, ratio * xi2, 1)
+    reward_u1 = jnp.where(main, 0, discount * reward_u1 - r_t - eta_reg_entropy)
+    reward_u2 = jnp.where(main, discount * reward_u2 - r_t - eta_reg_entropy, 0)
+
+    carry = v1, v2, next_values1, next_values2, reward1, reward2, xi1, xi2, reward_u1, reward_u2
+    return carry, (v, q_t)
+
+
+def vtrace_rnad(
+    next_value, ratios, logits, new_logits, actions,
+    log_policy_reg, values, rewards, next_dones, mains,
+    gamma, rho_min=0.001, rho_max=1.0, c_min=0.001, c_max=1.0, eta=0.2,
+):
+    probs = jax.nn.softmax(logits)
+    new_probs = jax.nn.softmax(new_logits)
+    eta_reg_entropy = -eta * jnp.sum(new_probs * log_policy_reg, axis=-1)
+    eta_log_policy = -eta * log_policy_reg
+    next_value1 = next_value
+    next_value2 = -next_value1
+    v1 = next_value1
+    v2 = next_value2
+    reward1 = reward2 = reward_u1 = reward_u2 = jnp.zeros_like(next_value)
+    xi1 = xi2 = jnp.ones_like(next_value)
+    carry = v1, v2, next_value1, next_value2, reward1, reward2, xi1, xi2, reward_u1, reward_u2
+
+    _, (targets, q_estimate) = jax.lax.scan(
+        partial(vtrace_rnad_loop, gamma=gamma, rho_min=rho_min, rho_max=rho_max, c_min=c_min, c_max=c_max),
+        carry, (ratios, values, rewards, eta_reg_entropy, probs, actions, eta_log_policy, next_dones, mains), reverse=True
+    )
+    targets = jax.lax.stop_gradient(targets)
+    return targets, q_estimate
+
+
+def vtrace_2p0s_loop(carry, inp, gamma, rho_min, rho_max, c_min, c_max):
     v1, v2, next_values1, next_values2, reward1, reward2, xi1, xi2, \
         last_return1, last_return2, next_q1, next_q2 = carry
     ratio, cur_values, next_done, r_t, main = inp
@@ -229,7 +326,7 @@ def vtrace_2p0s(
         return1, return2, next_q1, next_q2
 
     _, (targets, q_estimate, return_t) = jax.lax.scan(
-        partial(vtrace_loop, gamma=gamma, rho_min=rho_min, rho_max=rho_max, c_min=c_min, c_max=c_max),
+        partial(vtrace_2p0s_loop, gamma=gamma, rho_min=rho_min, rho_max=rho_max, c_min=c_min, c_max=c_max),
         carry, (ratios, values, next_dones, rewards, mains), reverse=True
     )
     advantages = q_estimate - values
@@ -309,6 +406,29 @@ def truncated_gae_2p0s(
     )
     if upgo:
         advantages += returns - values
+    targets = values + advantages
+    targets = jax.lax.stop_gradient(targets)
+    return targets, advantages
+
+
+def truncated_gae_loop(carry, inp, gamma, gae_lambda):
+    lastgaelam, next_value = carry
+    cur_value, next_done, reward = inp
+    nextnonterminal = 1.0 - next_done
+
+    delta = reward + gamma * next_value * nextnonterminal - cur_value
+    lastgaelam = delta + gamma * gae_lambda * nextnonterminal * lastgaelam
+    carry = lastgaelam, cur_value
+    return carry, lastgaelam
+
+
+def truncated_gae(next_value, values, rewards, next_dones, gamma, gae_lambda):
+    lastgaelam = jnp.zeros_like(next_value)
+    carry = lastgaelam, next_value
+    _, advantages = jax.lax.scan(
+        partial(truncated_gae_loop, gamma=gamma, gae_lambda=gae_lambda),
+        carry, (values, next_dones, rewards), reverse=True
+    )
     targets = values + advantages
     targets = jax.lax.stop_gradient(targets)
     return targets, advantages

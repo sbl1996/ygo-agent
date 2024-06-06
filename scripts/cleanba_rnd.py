@@ -8,7 +8,7 @@ from datetime import datetime, timedelta, timezone
 from collections import deque
 from dataclasses import dataclass, field, asdict
 from types import SimpleNamespace
-from typing import List, NamedTuple, Optional
+from typing import List, NamedTuple, Optional, Literal
 from functools import partial
 
 import ygoenv
@@ -25,10 +25,11 @@ from tensorboardX import SummaryWriter
 
 from ygoai.utils import init_ygopro, load_embeddings
 from ygoai.rl.ckpt import ModelCheckpoint, sync_to_gcs, zip_files
-from ygoai.rl.jax.agent import RNNAgent, ModelArgs
-from ygoai.rl.jax.utils import RecordEpisodeStatistics, masked_normalize, categorical_sample
+from ygoai.rl.jax.agent import RNNAgent, ModelArgs, RNDModel, EncoderArgs, default_rnd_args
+from ygoai.rl.jax.utils import RecordEpisodeStatistics, masked_normalize, categorical_sample, RunningMeanStd
 from ygoai.rl.jax.eval import evaluate, battle
-from ygoai.rl.jax import clipped_surrogate_pg_loss, vtrace_2p0s, mse_loss, entropy_loss, simple_policy_loss, ach_loss, policy_gradient_loss
+from ygoai.rl.jax import clipped_surrogate_pg_loss, vtrace_2p0s, mse_loss, entropy_loss, \
+    simple_policy_loss, ach_loss, policy_gradient_loss, truncated_gae
 from ygoai.rl.jax.switch import truncated_gae_2p0s as gae_2p0s_switch
 
 
@@ -153,6 +154,23 @@ class Args:
     m2: ModelArgs = field(default_factory=lambda: ModelArgs())
     """the model arguments for the eval agent"""
 
+    mr: EncoderArgs = field(default_factory=lambda: default_rnd_args)
+    """the model arguments for the RND network"""
+    int_gamma: float = 0.99
+    """the gamma for the intrinsic reward"""
+    rnd_update_proportion: float = 0.25
+    """proportion of exp used for predictor update"""
+    rnd_episodic: bool = False
+    """whether to use episodic intrinsic reward for RND"""
+    rnd_norm: Literal["default", "min_max"] = "default"
+    """the normalization method for RND intrinsic reward"""
+    int_coef: float = 0.5
+    """coefficient of intrinsic reward, 0.0 to disable RND"""
+    ext_coef: float = 1.0
+    """coefficient of extrinsic reward"""
+    reward_scale: float = 1.0
+    """the scaling factor of the reward"""
+
     actor_device_ids: List[int] = field(default_factory=lambda: [0, 1])
     """the device ids that actor workers will use"""
     learner_device_ids: List[int] = field(default_factory=lambda: [2, 3])
@@ -189,6 +207,7 @@ class Args:
     freeze_id: Optional[bool] = None
     deck_names: Optional[List[str]] = None
     real_seed: Optional[int] = None
+    enable_rnd: Optional[bool] = None
 
 
 def make_env(args, seed, num_envs, num_threads, mode='self', thread_affinity_offset=-1, eval=False):
@@ -224,6 +243,8 @@ class Transition(NamedTuple):
     rewards: list
     mains: list
     next_dones: list
+    target_feats: list = None
+    int_rewards: list = None
 
 
 def create_agent(args, eval=False):
@@ -241,6 +262,7 @@ def create_agent(args, eval=False):
             param_dtype=jnp.float32,
             switch=args.switch,
             freeze_id=args.freeze_id,
+            int_head=args.enable_rnd,
             **asdict(args.m1),
         )
 
@@ -249,6 +271,17 @@ def init_rnn_state(num_envs, rnn_channels):
     return (
         np.zeros((num_envs, rnn_channels)),
         np.zeros((num_envs, rnn_channels)),
+    )
+
+
+def create_rnd_model(args, predictor=False):
+    return RNDModel(
+        is_predictor=predictor,
+        embedding_shape=args.num_embeddings,
+        dtype=jnp.bfloat16 if args.bfloat16 else jnp.float32,
+        param_dtype=jnp.float32,
+        freeze_id=args.freeze_id,
+        **asdict(args.mr),
     )
 
 
@@ -303,7 +336,9 @@ def rollout(
 ):
     eval_mode = 'self' if args.eval_checkpoint else 'bot'
     if eval_mode != 'bot':
-        eval_params = params_queue.get()
+        eval_params, params_rt = params_queue.get()
+    else:
+        params_rt, = params_queue.get()
 
     local_seed = args.real_seed + device_thread_id * args.local_num_envs
     np.random.seed(local_seed)
@@ -332,9 +367,14 @@ def rollout(
     other_time = 0
     avg_ep_returns = deque(maxlen=1000)
     avg_win_rates = deque(maxlen=1000)
+    avg_ep_int_rewards = deque(maxlen=1000)
 
     agent = create_agent(args)
     eval_agent = create_agent(args, eval=eval_mode != 'bot')
+
+    if args.enable_rnd:
+        rnd_target = create_rnd_model(args)
+        rnd_predictor = create_rnd_model(args, predictor=True)
 
     @jax.jit
     def get_action(params, obs, rstate):
@@ -356,11 +396,24 @@ def rollout(
 
     @jax.jit
     def sample_action(
-        params, next_obs, rstate1, rstate2, main, done, key):
+        params, next_obs, rstate1, rstate2, main, done, key,
+        params_rt, params_rp, rewems):
         (rstate1, rstate2), logits = agent.apply(
             params, next_obs, (rstate1, rstate2), done, main)[:2]
         action, key = categorical_sample(logits, key)
-        return next_obs, done, main, rstate1, rstate2, action, logits, key
+
+        if args.enable_rnd:
+            target_feats = rnd_target.apply(params_rt, next_obs)
+            predict_feats = rnd_predictor.apply(params_rp, next_obs)
+            int_rewards = jnp.sum((target_feats - predict_feats) ** 2, axis=-1) / 2
+            if args.rnd_norm == 'min_max':
+                int_rewards = (int_rewards - int_rewards.min()) / (int_rewards.max() - int_rewards.min() + 1e-8)
+            else:
+                rewems = rewems * args.int_gamma + int_rewards
+        else:
+            target_feats = int_rewards = None
+        return next_obs, done, main, rstate1, rstate2, action, logits, key, \
+            target_feats, int_rewards, rewems
 
     deck_names = args.deck_names
     deck_avg_times = {name: 0 for name in deck_names}
@@ -389,6 +442,9 @@ def rollout(
     np.random.shuffle(main_player)
     storage = []
 
+    reward_rms = jax.device_put(RunningMeanStd.create())
+    rewems = jnp.zeros(args.local_num_envs, dtype=jnp.float32, device=actor_device)
+
     @jax.jit
     def prepare_data(storage: List[Transition]) -> Transition:
         return jax.tree.map(lambda *xs: jnp.split(jnp.stack(xs), len(learner_devices), axis=1), *storage)
@@ -404,17 +460,20 @@ def rollout(
         params_queue_get_time_start = time.time()
         if args.concurrency:
             if update != 2:
-                params = params_queue.get()
+                params, params_rp = params_queue.get()
                 # params["params"]["Encoder_0"]['Embed_0']["embedding"].block_until_ready()
                 actor_policy_version += 1
         else:
-            params = params_queue.get()
+            params, params_rp = params_queue.get()
             actor_policy_version += 1
         params_queue_get_time.append(time.time() - params_queue_get_time_start)
 
         rollout_time_start = time.time()
         init_rstate1, init_rstate2 = jax.tree.map(
             lambda x: x.copy(), (next_rstate1, next_rstate2))
+
+        all_int_rewards = []
+        all_dis_int_rewards = []
         for k in range(args.num_steps):
             global_step += args.local_num_envs * n_actors * args.world_size
 
@@ -422,8 +481,10 @@ def rollout(
 
             inference_time_start = time.time()
             cached_next_obs, cached_next_done, cached_main, \
-                next_rstate1, next_rstate2, action, logits, key = sample_action(
-                params, next_obs, next_rstate1, next_rstate2, main, next_done, key)
+                next_rstate1, next_rstate2, action, logits, key, \
+                target_feats, int_rewards, rewems = sample_action(
+                params, next_obs, next_rstate1, next_rstate2,
+                main, next_done, key, params_rt, params_rp, rewems)
 
             cpu_action = np.array(action)
             inference_time += time.time() - inference_time_start
@@ -440,10 +501,14 @@ def rollout(
                     mains=cached_main,
                     actions=action,
                     logits=logits,
-                    rewards=next_reward,
+                    rewards=next_reward * args.reward_scale,
                     next_dones=next_done,
+                    target_feats=target_feats,
                 )
             )
+            if args.enable_rnd:
+                all_int_rewards.append(int_rewards)
+                all_dis_int_rewards.append(rewems)
 
             for idx, d in enumerate(next_done):
                 if not d:
@@ -479,8 +544,23 @@ def rollout(
                 win = 1 if episode_reward > 0 else 0
                 avg_ep_returns.append(episode_reward)
                 avg_win_rates.append(win)
+                
+                avg_ep_int_rewards.append(float(int_rewards[idx]))
 
         rollout_time.append(time.time() - rollout_time_start)
+
+        if args.enable_rnd:
+            # TODO: update every step
+            all_int_rewards = jnp.stack(all_int_rewards)
+            if args.rnd_norm == 'default':
+                reward_rms = reward_rms.update(jnp.array(all_dis_int_rewards).flatten())
+                all_int_rewards = all_int_rewards / jnp.sqrt(reward_rms.var)
+            for k in range(args.num_steps):
+                int_rewards = all_int_rewards[k]
+                storage[k] = storage[k]._replace(int_rewards=int_rewards)
+            mean_int_rewards = jnp.mean(all_int_rewards)
+            max_int_rewards = jnp.max(all_int_rewards)
+
 
         partitioned_storage = prepare_data(storage)
         storage = []
@@ -546,6 +626,10 @@ def rollout(
                     f"rollout_time={rollout_time[-1]:.2f}, params_time={params_queue_get_time[-1]:.2f}"
                 )
             writer.add_scalar("stats/rollout_time", np.mean(rollout_time), tb_global_step)
+            if args.enable_rnd:
+                writer.add_scalar("charts/avg_episodic_int_rew", np.mean(avg_ep_int_rewards), tb_global_step)
+                writer.add_scalar("charts/mean_int_rew", float(mean_int_rewards), tb_global_step)
+                writer.add_scalar("charts/max_int_rew", float(max_int_rewards), tb_global_step)
             writer.add_scalar("charts/avg_episodic_return", avg_episodic_return, tb_global_step)
             writer.add_scalar("charts/avg_episodic_length", avg_episodic_length, tb_global_step)
             writer.add_scalar("stats/params_queue_get_time", np.mean(params_queue_get_time), tb_global_step)
@@ -583,6 +667,7 @@ def main():
     args.local_env_threads = args.local_env_threads or args.local_num_envs
     if args.segment_length is not None:
         assert args.num_steps % args.segment_length == 0, "num_steps must be divisible by segment_length"
+    args.enable_rnd = args.int_coef > 0
 
     if args.embedding_file:
         embeddings = load_embeddings(args.embedding_file, args.code_list_file)
@@ -684,6 +769,15 @@ def main():
         params = flax.core.unfreeze(params)
         params['params']['Encoder_0']['Embed_0']['embedding'] = jax.device_put(embeddings)
         params = flax.core.freeze(params)
+    
+    if args.enable_rnd:
+        rnd_init_key1, rnd_init_key2 = jax.random.split(init_key, 2)
+        rnd_target = create_rnd_model(args)
+        rnd_predictor = create_rnd_model(args, predictor=True)
+        params_rt = rnd_target.init(rnd_init_key1, sample_obs)
+        params_rp = rnd_predictor.init(rnd_init_key2, sample_obs)
+    else:
+        params_rt = params_rp = None
 
     tx = optax.MultiSteps(
         optax.chain(
@@ -697,9 +791,10 @@ def main():
     tx = optax.apply_if_finite(tx, max_consecutive_errors=10)
     agent_state = TrainState.create(
         apply_fn=None,
-        params=params,
+        params=(params, params_rp),
         tx=tx,
     )
+    # TODO: checkpoint for RND
     if args.checkpoint:
         with open(args.checkpoint, "rb") as f:
             params = flax.serialization.from_bytes(params, f.read())
@@ -743,9 +838,19 @@ def main():
         else:
             # TODO: TD(lambda) for multi-step
             ratios_ = reshape_time_series(ratios)
+            if args.enable_rnd:
+                new_values_, new_values_int_ = new_values_
+                next_value, next_value_int = next_value
+                rewards, rewards_int = rewards
             target_values, advantages = vtrace_2p0s(
                 next_value, ratios_, new_values_, rewards, next_dones, switch_or_mains, args.gamma,
                 args.rho_clip_min, args.rho_clip_max, args.c_clip_min, args.c_clip_max)
+            if args.enable_rnd:
+                next_dones = next_dones if args.rnd_episodic else jnp.zeros_like(next_dones)
+                target_values_int, advantages_int = truncated_gae(
+                    next_value_int, new_values_int_, rewards_int, next_dones, args.int_gamma, args.gae_lambda)
+                advantages = advantages * args.ext_coef + advantages_int * args.int_coef
+                target_values = (target_values, target_values_int)
 
         target_values, advantages = jax.tree.map(
             lambda x: jnp.reshape(x, (-1,)), (target_values, advantages))
@@ -776,7 +881,14 @@ def main():
             pg_advs = jnp.clip(ratios, args.rho_clip_min, args.rho_clip_max) * advantages
             pg_loss = policy_gradient_loss(new_logits, actions, pg_advs)
 
-        v_loss = mse_loss(new_values, target_values)
+        v_loss = 0
+        if args.enable_rnd:
+            new_values, new_values_int = new_values
+            target_values, target_values_int = target_values
+            int_v_loss = mse_loss(new_values_int, target_values_int)
+            v_loss += int_v_loss
+
+        v_loss += mse_loss(new_values, target_values)
         if args.vloss_clip is not None:
             v_loss = jnp.minimum(v_loss, args.vloss_clip)
 
@@ -795,6 +907,15 @@ def main():
 
         loss = pg_loss - args.ent_coef * ent_loss + v_loss * args.vf_coef
         return loss, pg_loss, v_loss, ent_loss, approx_kl
+
+    def compute_rnd_loss(params, obs, mask, target_feats, key):
+        n_use = int(mask.shape[0] * args.rnd_update_proportion)
+        obs, mask, target_feats = jax.tree.map(
+            lambda x: jax.random.permutation(key, x)[:n_use], (obs, mask, target_feats))
+        predict_feats = rnd_predictor.apply(params, obs)
+        rnd_loss = mse_loss(predict_feats, target_feats).mean(axis=-1)
+        rnd_loss = (rnd_loss * mask).sum() / jnp.maximum(mask.sum(), 1.0)
+        return rnd_loss
 
     def apply_fn(params, obs, rstate1, rstate2, dones, next_dones, switch_or_mains):
         if args.switch:
@@ -828,7 +949,9 @@ def main():
 
     def compute_loss(
         params, rstate1, rstate2, obs, dones, next_dones,
-        switch_or_mains, actions, logits, target_values, advantages, mask):
+        switch_or_mains, actions, logits, target_values, advantages, mask,
+        target_feats, key):
+        params, params_rp = params
         (rstate1, rstate2), new_logits, new_values = apply_fn(
             params, obs, rstate1, rstate2, dones, next_dones, switch_or_mains)
 
@@ -836,15 +959,23 @@ def main():
             new_logits, new_values, actions, logits, target_values, advantages,
             mask, num_steps=None)
 
+        if args.enable_rnd:
+            rnd_loss = compute_rnd_loss(params_rp, obs, mask, target_feats, key)
+            loss = loss + rnd_loss
+        else:
+            rnd_loss = jnp.zeros_like(loss)
+
         loss = jnp.where(jnp.isnan(loss) | jnp.isinf(loss), 0.0, loss)
         approx_kl, rstate1, rstate2 = jax.tree.map(
             jax.lax.stop_gradient, (approx_kl, rstate1, rstate2))
-        return loss, (pg_loss, v_loss, ent_loss, approx_kl, rstate1, rstate2)
+        return loss, (pg_loss, v_loss, ent_loss, rnd_loss, approx_kl, rstate1, rstate2)
 
     def compute_advantage_loss(
         params, rstate1, rstate2, obs, dones, next_dones,
-        switch_or_mains, actions, logits, rewards, next_value, mask):
+        switch_or_mains, actions, logits, rewards, next_value, mask,
+        target_feats, key):
         num_envs = jax.tree.leaves(next_value)[0].shape[0]
+        params, params_rp = params
         new_logits, new_values = apply_fn(
             params, obs, rstate1, rstate2, dones, next_dones, switch_or_mains)[1:3]
 
@@ -856,9 +987,21 @@ def main():
             new_logits, new_values, actions, logits, target_values, advantages,
             mask, num_steps=dones.shape[0] // num_envs)
 
+        if args.enable_rnd:
+            rnd_loss = compute_rnd_loss(params_rp, obs, mask, target_feats, key)
+            loss = loss + rnd_loss
+        else:
+            rnd_loss = jnp.zeros_like(loss)
+
         loss = jnp.where(jnp.isnan(loss) | jnp.isinf(loss), 0.0, loss)
         approx_kl = jax.lax.stop_gradient(approx_kl)
-        return loss, (pg_loss, v_loss, ent_loss, approx_kl)
+        return loss, (pg_loss, v_loss, ent_loss, rnd_loss, approx_kl)
+
+    def split_key_if(key, n, cond):
+        if cond:
+            return jax.random.split(key, n)
+        else:
+            return [key] * n
 
     def single_device_update(
         agent_state: TrainState,
@@ -898,10 +1041,15 @@ def main():
             agent_state, key = carry
             key, subkey = jax.random.split(key)
 
-            next_value = agent.apply(agent_state.params, *next_inputs)[2]
+            next_value = agent.apply(agent_state.params[0], *next_inputs)[2]
             next_value = jax.tree.map(lambda x: jnp.squeeze(x, axis=-1), next_value)
+
+            if args.enable_rnd:
+                next_value, next_value_int = next_value
             sign = -1 if args.switch else 1
             next_value = jnp.where(next_main, sign * next_value, -sign * next_value)
+            if args.enable_rnd:
+                next_value = next_value, next_value_int
 
             def convert_data(x: jnp.ndarray, multi_step=True):
                 key = subkey if args.update_epochs > 1 else None
@@ -919,38 +1067,43 @@ def main():
             shuffled_next_value = jax.tree.map(
                 partial(convert_data, multi_step=False), next_value)
             shuffled_rewards = shuffled_storage.rewards
+            if args.enable_rnd:
+                shuffled_rewards = shuffled_rewards, shuffled_storage.int_rewards
 
             if args.segment_length is None:
-                def update_minibatch(agent_state, minibatch):
-                    (loss, (pg_loss, v_loss, ent_loss, approx_kl)), grads = loss_grad_fn(
-                        agent_state.params, *minibatch)
+                def update_minibatch(carry, minibatch):
+                    agent_state, key = carry
+                    key, subkey = split_key_if(key, 2, args.enable_rnd)
+                    (loss, (pg_loss, v_loss, ent_loss, rnd_loss, approx_kl)), grads = loss_grad_fn(
+                        agent_state.params, *minibatch, subkey)
                     grads = jax.lax.pmean(grads, axis_name="local_devices")
                     agent_state = agent_state.apply_gradients(grads=grads)
-                    return agent_state, (loss, pg_loss, v_loss, ent_loss, approx_kl)
+                    return (agent_state, key), (loss, pg_loss, v_loss, ent_loss, rnd_loss, approx_kl)
             else:
                 def update_minibatch(carry, minibatch):
                     def update_minibatch_t(carry, minibatch_t):
-                        agent_state, rstate1, rstate2 = carry
+                        (agent_state, key), rstate1, rstate2 = carry
+                        key, subkey = split_key_if(key, 2, args.enable_rnd)
                         minibatch_t = rstate1, rstate2, *minibatch_t
                         (loss, (pg_loss, v_loss, ent_loss, approx_kl, rstate1, rstate2)), \
-                            grads = loss_grad_fn(agent_state.params, *minibatch_t)
+                            grads = loss_grad_fn(agent_state.params, *minibatch_t, subkey)
                         grads = jax.lax.pmean(grads, axis_name="local_devices")
                         agent_state = agent_state.apply_gradients(grads=grads)
-                        return (agent_state, rstate1, rstate2), (loss, pg_loss, v_loss, ent_loss, approx_kl)
+                        return ((agent_state, key), rstate1, rstate2), (loss, pg_loss, v_loss, ent_loss, approx_kl)
 
                     rstate1, rstate2, *minibatch_t, mask = minibatch
                     target_values, advantages = compute_advantage(
-                        carry.params, rstate1, rstate2, *minibatch_t)
+                        carry[0].params[0], rstate1, rstate2, *minibatch_t)
                     minibatch_t = *minibatch_t[:-2], target_values, advantages, mask
 
                     (carry, _rstate1, _rstate2), \
                         (loss, pg_loss, v_loss, ent_loss, approx_kl) = jax.lax.scan(
                         update_minibatch_t, (carry, rstate1, rstate2), minibatch_t)
-                    return carry, (loss, pg_loss, v_loss, ent_loss, approx_kl)
-      
-            agent_state, (loss, pg_loss, v_loss, ent_loss, approx_kl) = jax.lax.scan(
+                    return carry, (loss, pg_loss, v_loss, ent_loss, rnd_loss, approx_kl)
+
+            (agent_state, key), (loss, pg_loss, v_loss, ent_loss, rnd_loss, approx_kl) = jax.lax.scan(
                 update_minibatch,
-                agent_state,
+                (agent_state, key),
                 (
                     shuffled_init_rstate1,
                     shuffled_init_rstate2,
@@ -963,11 +1116,12 @@ def main():
                     shuffled_rewards,
                     shuffled_next_value,
                     shuffled_mask,
+                    shuffled_storage.target_feats,
                 ),
             )
-            return (agent_state, key), (loss, pg_loss, v_loss, ent_loss, approx_kl)
+            return (agent_state, key), (loss, pg_loss, v_loss, ent_loss, rnd_loss, approx_kl)
 
-        (agent_state, key), (loss, pg_loss, v_loss, ent_loss, approx_kl) = jax.lax.scan(
+        (agent_state, key), (loss, pg_loss, v_loss, ent_loss, rnd_loss, approx_kl) = jax.lax.scan(
             update_epoch, (agent_state, key), (), length=args.update_epochs
         )
         loss = jax.lax.pmean(loss, axis_name="local_devices").mean()
@@ -975,7 +1129,9 @@ def main():
         v_loss = jax.lax.pmean(v_loss, axis_name="local_devices").mean()
         ent_loss = jax.lax.pmean(ent_loss, axis_name="local_devices").mean()
         approx_kl = jax.lax.pmean(approx_kl, axis_name="local_devices").mean()
-        return agent_state, loss, pg_loss, v_loss, ent_loss, approx_kl, key
+        rnd_loss = jax.lax.pmean(
+            rnd_loss, axis_name="local_devices").mean() if args.enable_rnd else 0
+        return agent_state, loss, pg_loss, v_loss, ent_loss, rnd_loss, approx_kl, key
 
     all_reduce_value = jax.pmap(
         lambda x: jax.lax.pmean(x, axis_name="main_devices"),
@@ -999,9 +1155,11 @@ def main():
         for thread_id in range(args.num_actor_threads):
             params_queues.append(queue.Queue(maxsize=1))
             rollout_queues.append(queue.Queue(maxsize=1))
+            init_params = [params_rt]
             if eval_params:
-                params_queues[-1].put(
-                    jax.device_put(eval_params, actor_device))
+                init_params.append(eval_params)
+            params_queues[-1].put(
+                jax.device_put(init_params, actor_device))
             actor_thread_id = d_idx * args.num_actor_threads + thread_id             
             threading.Thread(
                 target=rollout,
@@ -1050,7 +1208,7 @@ def main():
 
         rollout_queue_get_time.append(time.time() - rollout_queue_get_time_start)
         training_time_start = time.time()
-        (agent_state, loss, pg_loss, v_loss, ent_loss, approx_kl, learner_keys) = multi_device_update(
+        (agent_state, loss, pg_loss, v_loss, ent_loss, rnd_loss, approx_kl, learner_keys) = multi_device_update(
             agent_state,
             *list(zip(*sharded_data_list)),
             learner_keys,
@@ -1059,7 +1217,7 @@ def main():
         params_queue_put_time = 0
         for d_idx, d_id in enumerate(args.actor_device_ids):
             device_params = jax.device_put(unreplicated_params, local_devices[d_id])
-            device_params["params"]["Encoder_0"]['Embed_0']["embedding"].block_until_ready()
+            device_params[0]["params"]["Encoder_0"]['Embed_0']["embedding"].block_until_ready()
             params_queue_put_start = time.time()
             for thread_id in range(args.num_actor_threads):
                 params_queues[d_idx * args.num_actor_threads + thread_id].put(device_params)
@@ -1089,6 +1247,8 @@ def main():
             writer.add_scalar(
                 "charts/learning_rate", agent_state.opt_state[3][2][1].hyperparams["learning_rate"][-1].item(), tb_global_step
             )
+            if args.enable_rnd:
+                writer.add_scalar("losses/rnd_loss", rnd_loss[-1].item(), tb_global_step)
             writer.add_scalar("losses/value_loss", v_loss[-1].item(), tb_global_step)
             writer.add_scalar("losses/policy_loss", pg_loss[-1].item(), tb_global_step)
             writer.add_scalar("losses/entropy", ent_loss[-1].item(), tb_global_step)

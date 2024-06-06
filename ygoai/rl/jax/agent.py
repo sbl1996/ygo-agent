@@ -506,40 +506,39 @@ def rnn_forward_2p(rnn_layer, rstate, f_state, done, switch_or_main, switch=True
 
 
 @dataclass
-class ModelArgs:
+class EncoderArgs:
     num_layers: int = 2
     """the number of layers for the agent"""
     num_channels: int = 128
     """the number of channels for the agent"""
-    rnn_channels: int = 512
-    """the number of channels for the RNN in the agent"""
     use_history: bool = True
     """whether to use history actions as input for agent"""
     card_mask: bool = False
     """whether to mask the padding card as ignored in the transformer"""
-    rnn_type: Optional[Literal['lstm', 'gru', 'rwkv', 'none']] = "lstm"
-    """the type of RNN to use, None for no RNN"""
-    film: bool = False
-    """whether to use FiLM for the actor"""
     noam: bool = False
     """whether to use Noam architecture for the transformer layer"""
-    rwkv_head_size: int = 32
-    """the head size for the RWKV"""
     action_feats: bool = True
     """whether to use action features for the global state"""
     version: int = 0
     """the version of the environment and the agent"""
 
 
+@dataclass
+class ModelArgs(EncoderArgs):
+    rnn_channels: int = 512
+    """the number of channels for the RNN in the agent"""
+    rnn_type: Optional[Literal['lstm', 'gru', 'rwkv', 'none']] = "lstm"
+    """the type of RNN to use, None for no RNN"""
+    film: bool = False
+    """whether to use FiLM for the actor"""
+    rwkv_head_size: int = 32
+    """the head size for the RWKV"""
+
+
 class RNNAgent(nn.Module):
     num_layers: int = 2
     num_channels: int = 128
     rnn_channels: int = 512
-    embedding_shape: Optional[Union[int, Tuple[int, int]]] = None
-    dtype: jnp.dtype = jnp.float32
-    param_dtype: jnp.dtype = jnp.float32
-    switch: bool = True
-    freeze_id: bool = False
     use_history: bool = True
     card_mask: bool = False
     rnn_type: str = 'lstm'
@@ -548,6 +547,13 @@ class RNNAgent(nn.Module):
     rwkv_head_size: int = 32
     action_feats: bool = True
     version: int = 0
+
+    switch: bool = True
+    freeze_id: bool = False
+    int_head: bool = False
+    embedding_shape: Optional[Union[int, Tuple[int, int]]] = None
+    dtype: jnp.dtype = jnp.float32
+    param_dtype: jnp.dtype = jnp.float32
 
     @nn.compact
     def __call__(self, x, rstate, done=None, switch_or_main=None):
@@ -618,6 +624,11 @@ class RNNAgent(nn.Module):
         
         logits = actor(f_state_r, f_actions, mask)
         value = critic(f_state_r)
+        if self.int_head:
+            critic_int = Critic(
+                channels=[c, c, c], dtype=self.dtype, param_dtype=self.param_dtype)
+            value_int = critic_int(f_state_r)
+            value = (value, value_int)
         return rstate, logits, value, valid
 
     def init_rnn_state(self, batch_size):
@@ -637,3 +648,61 @@ class RNNAgent(nn.Module):
             )
         else:
             return None
+
+
+default_rnd_args = EncoderArgs(
+    num_layers=1,
+    num_channels=128,
+    use_history=True,
+    card_mask=False,
+    noam=True,
+    action_feats=True,
+    version=2,
+)
+
+class RNDModel(nn.Module):
+    is_predictor: bool = False
+    num_layers: int = 1
+    num_channels: int = 128
+    use_history: bool = True
+    card_mask: bool = False
+    noam: bool = True
+    action_feats: bool = True
+    version: int = 2
+
+    out_channels: Optional[int] = None
+    freeze_id: bool = True
+    embedding_shape: Optional[Union[int, Tuple[int, int]]] = None
+    dtype: jnp.dtype = jnp.float32
+    param_dtype: jnp.dtype = jnp.float32
+
+
+    @nn.compact
+    def __call__(self, x):
+        c = self.num_channels
+        oc = self.out_channels or c * 2
+        encoder = Encoder(
+            channels=c,
+            out_channels=oc,
+            num_layers=self.num_layers,
+            embedding_shape=self.embedding_shape,
+            dtype=self.dtype,
+            param_dtype=self.param_dtype,
+            freeze_id=self.freeze_id,
+            use_history=self.use_history,
+            card_mask=self.card_mask,
+            noam=self.noam,
+            action_feats=self.action_feats,
+            version=self.version,
+        )
+
+        f_actions, f_state, mask, valid = encoder(x)
+        c = f_state.shape[-1]
+        if self.is_predictor:
+            predictor = MLP([oc, oc], dtype=self.dtype, param_dtype=self.param_dtype)
+            f_state = predictor(f_state)
+        else:
+            f_state = nn.Dense(
+                oc, dtype=self.dtype, param_dtype=self.param_dtype,
+                kernel_init=nn.initializers.orthogonal(np.sqrt(2)))(f_state)
+        return f_state
