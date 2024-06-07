@@ -113,7 +113,7 @@ class CardEncoder(nn.Module):
         c_mask = x_loc == 0
         c_mask = c_mask.at[:, 0].set(False)
 
-        x_owner = embed(2, c // 16)(x1[:, :, 2])
+        x_owner = embed(3, c // 16)(x1[:, :, 2])
         x_position = embed(9, c // 16)(x1[:, :, 3])
         x_overley = embed(2, c // 16)(x1[:, :, 4])
         x_attribute = embed(8, c // 16)(x1[:, :, 5])
@@ -208,6 +208,7 @@ class Encoder(nn.Module):
     card_mask: bool = False
     noam: bool = False
     action_feats: bool = True
+    oppo_info: bool = False
     version: int = 0
 
     @nn.compact
@@ -227,44 +228,64 @@ class Encoder(nn.Module):
         fc_layer = partial(nn.Dense, use_bias=False, param_dtype=self.param_dtype)
 
         id_embed = embed(n_embed, embed_dim)
+        card_encoder = CardEncoder(
+            channels=c, dtype=jnp.float32, param_dtype=self.param_dtype, version=self.version)
         ActionEncoderCls = ActionEncoder if self.version == 0 else ActionEncoderV1
         action_encoder = ActionEncoderCls(
             channels=c, dtype=jnp.float32, param_dtype=self.param_dtype)
+        
+        x_cards_g = x['g_cards_'] if self.oppo_info else None
 
         x_cards = x['cards_']
         x_global = x['global_']
         x_actions = x['actions_']
         x_h_actions = x['h_actions_']
-        batch_size = x_cards.shape[0]
+        batch_size = x_global.shape[0]
         
         valid = x_global[:, -1] == 0
+
+        n_cards = x_cards.shape[-2]
+        if self.oppo_info:
+            x_cards = jnp.concatenate([x_cards, x_cards_g], axis=-2)
 
         x_id = decode_id(x_cards[:, :, :2].astype(jnp.int32))
         x_id = id_embed(x_id)
         if self.freeze_id:
             x_id = jax.lax.stop_gradient(x_id)
+        f_cards, c_mask = card_encoder(x_id, x_cards[:, :, 2:])
+
+        if self.oppo_info:
+            f_cards_me, f_cards_g = jnp.split(f_cards, [n_cards], axis=-2)
+        else:
+            f_cards_me, f_cards_g = f_cards, None
 
         # Cards
-        f_cards, c_mask = CardEncoder(
-            channels=c, dtype=jnp.float32, param_dtype=self.param_dtype, version=self.version)(x_id, x_cards[:, :, 2:])
-        g_card_embed = self.param(
-            'g_card_embed',
-            lambda key, shape, dtype: jax.random.normal(key, shape, dtype) * 0.02,
-            (1, c), self.param_dtype)
-        f_g_card = jnp.tile(g_card_embed, (batch_size, 1, 1)).astype(f_cards.dtype)
-        f_cards = jnp.concatenate([f_g_card, f_cards], axis=1)
-        if self.card_mask:
-            c_mask = jnp.concatenate([jnp.zeros((batch_size, 1), dtype=c_mask.dtype), c_mask], axis=1)
-        else:
-            c_mask = None
+        fs_g_card = []
+        for i, f_cards in enumerate([f_cards_g, f_cards_me]):
+            if f_cards is None:
+                fs_g_card.append(None)
+                continue
+            name = 'g_card_embed' if i == 0 else 'g_g_card_embed'
+            g_card_embed = self.param(
+                name,
+                lambda key, shape, dtype: jax.random.normal(key, shape, dtype) * 0.02,
+                (1, c), self.param_dtype)
+            f_g_card = jnp.tile(g_card_embed, (batch_size, 1, 1)).astype(f_cards.dtype)
+            f_cards = jnp.concatenate([f_g_card, f_cards], axis=1)
+            if self.card_mask:
+                c_mask = jnp.concatenate([jnp.zeros((batch_size, 1), dtype=c_mask.dtype), c_mask], axis=1)
+            else:
+                c_mask = None
 
-        num_heads = max(2, c // 128)
-        for _ in range(self.num_layers):
-            f_cards = get_encoder_layer_cls(
-                self.noam, num_heads, dtype=self.dtype, param_dtype=self.param_dtype)(
-                f_cards, src_key_padding_mask=c_mask)
-        f_cards = layer_norm(dtype=self.dtype)(f_cards)
-        f_g_card = f_cards[:, 0]
+            num_heads = max(2, c // 128)
+            for _ in range(self.num_layers):
+                f_cards = get_encoder_layer_cls(
+                    self.noam, num_heads, dtype=self.dtype, param_dtype=self.param_dtype)(
+                    f_cards, src_key_padding_mask=c_mask)
+            f_cards = layer_norm(dtype=self.dtype)(f_cards)
+            f_g_card = f_cards[:, 0]
+            fs_g_card.append(f_g_card)
+        f_g_g_card, f_g_card = fs_g_card
 
         # Global
         x_global = GlobalEncoder(
@@ -412,7 +433,8 @@ class Encoder(nn.Module):
         else:
             f_state = MLP((c * 2, oc), dtype=self.dtype, param_dtype=self.param_dtype)(f_state)
         f_state = layer_norm(dtype=self.dtype)(f_state)
-        return f_actions, f_state, a_mask, valid
+
+        return f_actions, f_state, f_g_g_card, a_mask, valid
 
 
 class Actor(nn.Module):
@@ -473,7 +495,29 @@ class Critic(nn.Module):
         return x
 
 
-def rnn_step_by_main(rnn_layer, rstate, f_state, done, main):
+class GlobalCritic(nn.Module):
+    channels: Sequence[int] = (128, 128)
+    dtype: Optional[jnp.dtype] = None
+    param_dtype: jnp.dtype = jnp.float32
+    
+    @nn.compact
+    def __call__(self, rstate1, rstate2, g_cards):
+        f_state = jnp.concatenate([rstate1[0], rstate1[1], rstate2[0], rstate2[0]], axis=-1)
+        mlp = partial(MLP, dtype=self.dtype, param_dtype=self.param_dtype)
+        x = mlp(self.channels, last_lin=True)(f_state)
+
+        c = self.channels[-1]
+        t = nn.Dense(c * 2, dtype=self.dtype, param_dtype=self.param_dtype)(g_cards)
+        s, b  = jnp.split(t, 2, axis=-1)
+        x = x * s + b
+        
+        x = mlp([c], last_lin=False)(x)
+
+        x = nn.Dense(1, dtype=jnp.float32, param_dtype=self.param_dtype, kernel_init=nn.initializers.orthogonal(1.0))(x)
+        return x
+
+
+def rnn_step_by_main(rnn_layer, rstate, f_state, done, main, return_state=False):
     if main is not None:
         rstate1, rstate2 = rstate
         rstate = jax.tree.map(lambda x1, x2: jnp.where(main[:, None], x1, x2), rstate1, rstate2)
@@ -484,10 +528,13 @@ def rnn_step_by_main(rnn_layer, rstate, f_state, done, main):
         rstate = rstate1, rstate2
     if done is not None:
         rstate = jax.tree.map(lambda x: jnp.where(done[:, None], 0, x), rstate)
-    return rstate, f_state
+    if return_state:
+        return rstate, (f_state, rstate)
+    else:
+        return rstate, f_state
 
 
-def rnn_forward_2p(rnn_layer, rstate, f_state, done, switch_or_main, switch=True):
+def rnn_forward_2p(rnn_layer, rstate, f_state, done, switch_or_main, switch=True, return_state=False):
     if switch:
         def body_fn(cell, carry, x, done, switch):
             rstate, init_rstate2 = carry
@@ -497,7 +544,7 @@ def rnn_forward_2p(rnn_layer, rstate, f_state, done, switch_or_main, switch=True
             return (rstate, init_rstate2), y
     else:
         def body_fn(cell, carry, x, done, main):
-            return rnn_step_by_main(cell, carry, x, done, main)
+            return rnn_step_by_main(cell, carry, x, done, main, return_state)
     scan = nn.scan(
         body_fn, variable_broadcast='params',
         split_rngs={'params': False})
@@ -531,6 +578,8 @@ class ModelArgs(EncoderArgs):
     """the type of RNN to use, None for no RNN"""
     film: bool = False
     """whether to use FiLM for the actor"""
+    oppo_info: bool = False
+    """whether to use opponent's information"""
     rwkv_head_size: int = 32
     """the head size for the RWKV"""
 
@@ -546,6 +595,7 @@ class RNNAgent(nn.Module):
     noam: bool = False
     rwkv_head_size: int = 32
     action_feats: bool = True
+    oppo_info: bool = False
     version: int = 0
 
     switch: bool = True
@@ -557,6 +607,8 @@ class RNNAgent(nn.Module):
 
     @nn.compact
     def __call__(self, x, rstate, done=None, switch_or_main=None):
+        batch_size = jax.tree.leaves(rstate)[0].shape[0]
+
         c = self.num_channels
         oc = self.rnn_channels if self.rnn_type == 'rwkv' else None
         encoder = Encoder(
@@ -571,10 +623,11 @@ class RNNAgent(nn.Module):
             card_mask=self.card_mask,
             noam=self.noam,
             action_feats=self.action_feats,
+            oppo_info=self.oppo_info,
             version=self.version,
         )
 
-        f_actions, f_state, mask, valid = encoder(x)
+        f_actions, f_state, f_g, mask, valid = encoder(x)
 
         if self.rnn_type in ['lstm', 'none']:
             rnn_layer = nn.OptimizedLSTMCell(
@@ -594,7 +647,6 @@ class RNNAgent(nn.Module):
         elif self.rnn_type == 'none':
             f_state_r = jnp.concatenate([f_state for i in range(self.rnn_channels // c)], axis=-1)
         else:
-            batch_size = jax.tree.leaves(rstate)[0].shape[0]
             num_steps = f_state.shape[0] // batch_size
             multi_step = num_steps > 1
 
@@ -607,7 +659,11 @@ class RNNAgent(nn.Module):
                 f_state_r, done, switch_or_main = jax.tree.map(
                     lambda x: jnp.reshape(x, (num_steps, batch_size) + x.shape[1:]), (f_state, done, switch_or_main))
                 rstate, f_state_r = rnn_forward_2p(
-                    rnn_layer, rstate, f_state_r, done, switch_or_main, self.switch)
+                    rnn_layer, rstate, f_state_r, done, switch_or_main, self.switch, return_state=self.oppo_info)
+                if self.oppo_info:
+                    f_state_r, all_rstate = f_state_r
+                    all_rstate = jax.tree.map(
+                        lambda x: jnp.reshape(x, (-1, x.shape[-1])), all_rstate)
                 f_state_r = f_state_r.reshape((-1, f_state_r.shape[-1]))
             else:
                 rstate, f_state_r = rnn_step_by_main(
@@ -619,11 +675,29 @@ class RNNAgent(nn.Module):
         else:
             actor = Actor(
                 channels=c, dtype=jnp.float32, param_dtype=self.param_dtype)
-        critic = Critic(
-            channels=[c, c, c], dtype=self.dtype, param_dtype=self.param_dtype)
-        
         logits = actor(f_state_r, f_actions, mask)
-        value = critic(f_state_r)
+
+        if self.oppo_info:
+            critic = GlobalCritic(
+                channels=[c, c], dtype=self.dtype, param_dtype=self.param_dtype)
+            if not multi_step:
+                if isinstance(rstate[0], tuple):
+                    rstate1_t, rstate2_t = rstate
+                else:
+                    rstate1_t = rstate2_t = rstate
+            else:
+                main = switch_or_main.reshape(-1)[:, None]
+                rstate1, rstate2 = all_rstate
+                rstate1_t = jax.tree.map(
+                    lambda x1, x2: jnp.where(main, x1, x2), rstate1, rstate2)
+                rstate2_t = jax.tree.map(
+                    lambda x1, x2: jnp.where(main, x2, x1), rstate1, rstate2)
+            value = critic(rstate1_t, rstate2_t, f_g)
+        else:
+            critic = Critic(
+                channels=[c, c, c], dtype=self.dtype, param_dtype=self.param_dtype)
+            value = critic(f_state_r)
+        
         if self.int_head:
             critic_int = Critic(
                 channels=[c, c, c], dtype=self.dtype, param_dtype=self.param_dtype)
@@ -696,7 +770,7 @@ class RNDModel(nn.Module):
             version=self.version,
         )
 
-        f_actions, f_state, mask, valid = encoder(x)
+        f_state = encoder(x)[1]
         c = f_state.shape[-1]
         if self.is_predictor:
             predictor = MLP([oc, oc], dtype=self.dtype, param_dtype=self.param_dtype)

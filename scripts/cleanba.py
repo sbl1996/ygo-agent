@@ -211,6 +211,7 @@ def make_env(args, seed, num_envs, num_threads, mode='self', thread_affinity_off
         greedy_reward=args.greedy_reward if not eval else True,
         play_mode=mode,
         timeout=args.timeout,
+        oppo_info=args.m2.oppo_info if eval else args.m1.oppo_info,
     )
     envs.num_envs = num_envs
     return envs
