@@ -265,7 +265,7 @@ class Encoder(nn.Module):
             if f_cards is None:
                 fs_g_card.append(None)
                 continue
-            name = 'g_card_embed' if i == 0 else 'g_g_card_embed'
+            name = 'g_g_card_embed' if i == 0 else 'g_card_embed'
             g_card_embed = self.param(
                 name,
                 lambda key, shape, dtype: jax.random.normal(key, shape, dtype) * 0.02,
