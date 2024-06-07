@@ -162,7 +162,7 @@ class Args:
     """proportion of exp used for predictor update"""
     rnd_episodic: bool = False
     """whether to use episodic intrinsic reward for RND"""
-    rnd_norm: Literal["default", "min_max"] = "default"
+    rnd_norm: Literal["default", "min_max", "min_max2"] = "default"
     """the normalization method for RND intrinsic reward"""
     int_coef: float = 0.5
     """coefficient of intrinsic reward, 0.0 to disable RND"""
@@ -393,6 +393,15 @@ def rollout(
         rstate1, rstate2 = jax.tree.map(
             lambda x: jnp.where(done[:, None], 0, x), (rstate1, rstate2))
         return rstate1, rstate2, logits.argmax(axis=1)
+    
+    @jax.jit
+    def compute_int_rew(params_rt, params_rp, obs):
+        target_feats = rnd_target.apply(params_rt, obs)
+        predict_feats = rnd_predictor.apply(params_rp, obs)
+        int_rewards = jnp.sum((target_feats - predict_feats) ** 2, axis=-1) / 2
+        if args.rnd_norm == 'min_max':
+            int_rewards = (int_rewards - int_rewards.min()) / (int_rewards.max() - int_rewards.min() + 1e-8)
+        return target_feats, int_rewards
 
     @jax.jit
     def sample_action(
@@ -403,12 +412,8 @@ def rollout(
         action, key = categorical_sample(logits, key)
 
         if args.enable_rnd:
-            target_feats = rnd_target.apply(params_rt, next_obs)
-            predict_feats = rnd_predictor.apply(params_rp, next_obs)
-            int_rewards = jnp.sum((target_feats - predict_feats) ** 2, axis=-1) / 2
-            if args.rnd_norm == 'min_max':
-                int_rewards = (int_rewards - int_rewards.min()) / (int_rewards.max() - int_rewards.min() + 1e-8)
-            else:
+            target_feats, int_rewards = compute_int_rew(params_rt, params_rp, next_obs)
+            if args.rnd_norm == 'default':
                 rewems = rewems * args.int_gamma + int_rewards
         else:
             target_feats = int_rewards = None
@@ -442,7 +447,7 @@ def rollout(
     np.random.shuffle(main_player)
     storage = []
 
-    reward_rms = jax.device_put(RunningMeanStd.create())
+    reward_rms = RunningMeanStd()
     rewems = jnp.zeros(args.local_num_envs, dtype=jnp.float32, device=actor_device)
 
     @jax.jit
@@ -550,16 +555,28 @@ def rollout(
         rollout_time.append(time.time() - rollout_time_start)
 
         if args.enable_rnd:
+            next_int_reward = compute_int_rew(params_rt, params_rp, next_obs)[1]
+            all_int_rewards = all_int_rewards[1:] + [next_int_reward]
+
             # TODO: update every step
             all_int_rewards = jnp.stack(all_int_rewards)
             if args.rnd_norm == 'default':
-                reward_rms = reward_rms.update(jnp.array(all_dis_int_rewards).flatten())
-                all_int_rewards = all_int_rewards / jnp.sqrt(reward_rms.var)
+                all_dis_int_rewards = jnp.concatenate(all_dis_int_rewards)
+                mean, std = jax.device_get((
+                    all_dis_int_rewards.mean(), all_dis_int_rewards.std()))
+                count = len(all_dis_int_rewards)
+                reward_rms.update_from_moments(mean, std**2, count)
+                all_int_rewards = all_int_rewards / np.sqrt(reward_rms.var)
+            elif args.rnd_norm == 'min_max2':
+                max_int_rewards = jnp.max(all_int_rewards)
+                min_int_rewards = jnp.min(all_int_rewards)
+                all_int_rewards = (all_int_rewards - min_int_rewards) / (max_int_rewards - min_int_rewards)
+            mean_int_rewards = jnp.mean(all_int_rewards)
+            max_int_rewards = jnp.max(all_int_rewards)
+
             for k in range(args.num_steps):
                 int_rewards = all_int_rewards[k]
                 storage[k] = storage[k]._replace(int_rewards=int_rewards)
-            mean_int_rewards = jnp.mean(all_int_rewards)
-            max_int_rewards = jnp.max(all_int_rewards)
 
 
         partitioned_storage = prepare_data(storage)

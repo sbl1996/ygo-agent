@@ -1,7 +1,7 @@
 import jax
 import jax.numpy as jnp
 
-from flax import struct
+import numpy as np
 
 from ygoai.rl.env import RecordEpisodeStatistics
 
@@ -28,35 +28,28 @@ def categorical_sample(logits, key):
     return action, key
 
 
-class RunningMeanStd(struct.PyTreeNode):
+class RunningMeanStd:
     """Tracks the mean, variance and count of values."""
 
-    mean: jnp.ndarray = struct.field(pytree_node=True)
-    var: jnp.ndarray = struct.field(pytree_node=True)
-    count: jnp.ndarray = struct.field(pytree_node=True)
-
-    @classmethod
-    def create(cls, shape=()):
-        # TODO: use numpy and float64
-        return cls(
-            mean=jnp.zeros(shape, "float32"),
-            var=jnp.ones(shape, "float32"),
-            count=jnp.full(shape, 1e-4, "float32"),
-        )
+    # https://en.wikipedia.org/wiki/Algorithms_for_calculating_variance#Parallel_algorithm
+    def __init__(self, epsilon=1e-4, shape=()):
+        """Tracks the mean, variance and count of values."""
+        self.mean = np.zeros(shape, "float64")
+        self.var = np.ones(shape, "float64")
+        self.count = epsilon
 
     def update(self, x):
         """Updates the mean, var and count from a batch of samples."""
-        batch_mean = jnp.mean(x, axis=0)
-        batch_var = jnp.var(x, axis=0)
+        batch_mean = np.mean(x, axis=0)
+        batch_var = np.var(x, axis=0)
         batch_count = x.shape[0]
-        return self.update_from_moments(batch_mean, batch_var, batch_count)
+        self.update_from_moments(batch_mean, batch_var, batch_count)
 
     def update_from_moments(self, batch_mean, batch_var, batch_count):
         """Updates from batch mean, variance and count moments."""
-        mean, var, count = update_mean_var_count_from_moments(
+        self.mean, self.var, self.count = update_mean_var_count_from_moments(
             self.mean, self.var, self.count, batch_mean, batch_var, batch_count
         )
-        return self.replace(mean=mean, var=var, count=count)
 
 
 def update_mean_var_count_from_moments(
@@ -69,7 +62,7 @@ def update_mean_var_count_from_moments(
     new_mean = mean + delta * batch_count / tot_count
     m_a = var * count
     m_b = batch_var * batch_count
-    M2 = m_a + m_b + jnp.square(delta) * count * batch_count / tot_count
+    M2 = m_a + m_b + np.square(delta) * count * batch_count / tot_count
     new_var = M2 / tot_count
     new_count = tot_count
 
