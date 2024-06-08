@@ -8,7 +8,7 @@ from datetime import datetime, timedelta, timezone
 from collections import deque
 from dataclasses import dataclass, field, asdict
 from types import SimpleNamespace
-from typing import List, NamedTuple, Optional
+from typing import List, NamedTuple, Optional, Literal
 from functools import partial
 
 import ygoenv
@@ -28,7 +28,8 @@ from ygoai.rl.ckpt import ModelCheckpoint, sync_to_gcs, zip_files
 from ygoai.rl.jax.agent import RNNAgent, ModelArgs
 from ygoai.rl.jax.utils import RecordEpisodeStatistics, masked_normalize, categorical_sample
 from ygoai.rl.jax.eval import evaluate, battle
-from ygoai.rl.jax import clipped_surrogate_pg_loss, vtrace_2p0s, mse_loss, entropy_loss, simple_policy_loss, ach_loss, policy_gradient_loss
+from ygoai.rl.jax import clipped_surrogate_pg_loss, mse_loss, entropy_loss, simple_policy_loss, \
+    ach_loss, policy_gradient_loss, vtrace, vtrace_2p0s, truncated_gae
 from ygoai.rl.jax.switch import truncated_gae_2p0s as gae_2p0s_switch
 
 
@@ -116,6 +117,10 @@ class Args:
 
     upgo: bool = True
     """Toggle the use of UPGO for advantages"""
+    sep_value: bool = True
+    """Whether separate value function computation for each player"""
+    value: Literal["vtrace", "gae"] = "vtrace"
+    """the method to learn the value function"""
     gae_lambda: float = 0.95
     """the lambda for the general advantage estimation"""
     c_clip_min: float = 0.001
@@ -738,15 +743,25 @@ def main():
 
         # Advantages and target values
         if args.switch:
+            if args.value == "vtrace" or args.sep_value:
+                raise NotImplementedError
             target_values, advantages = gae_2p0s_switch(
                 next_value, new_values_, rewards, next_dones, switch_or_mains,
                 args.gamma, args.gae_lambda, args.upgo)
         else:
             # TODO: TD(lambda) for multi-step
             ratios_ = reshape_time_series(ratios)
-            target_values, advantages = vtrace_2p0s(
-                next_value, ratios_, new_values_, rewards, next_dones, switch_or_mains, args.gamma,
-                args.rho_clip_min, args.rho_clip_max, args.c_clip_min, args.c_clip_max)
+            if args.value == "gae":
+                if not args.sep_value:
+                    raise NotImplementedError
+                target_values, advantages = truncated_gae(
+                    next_value, new_values_, rewards, next_dones, switch_or_mains,
+                    args.gamma, args.gae_lambda, args.upgo)
+            else:
+                vtrace_fn = vtrace if args.sep_value else vtrace_2p0s
+                target_values, advantages = vtrace_fn(
+                    next_value, ratios_, new_values_, rewards, next_dones, switch_or_mains, args.gamma,
+                    args.rho_clip_min, args.rho_clip_max, args.c_clip_min, args.c_clip_max)
 
         target_values, advantages = jax.tree.map(
             lambda x: jnp.reshape(x, (-1,)), (target_values, advantages))
