@@ -113,7 +113,7 @@ class CardEncoder(nn.Module):
         c_mask = x_loc == 0
         c_mask = c_mask.at[:, 0].set(False)
 
-        x_owner = embed(3, c // 16)(x1[:, :, 2])
+        x_owner = embed(2, c // 16)(x1[:, :, 2])
         x_position = embed(9, c // 16)(x1[:, :, 3])
         x_overley = embed(2, c // 16)(x1[:, :, 4])
         x_attribute = embed(8, c // 16)(x1[:, :, 5])
