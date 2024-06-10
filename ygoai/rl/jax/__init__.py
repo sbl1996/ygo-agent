@@ -244,7 +244,7 @@ def vtrace(
     return targets, advantages
 
 
-def vtrace_2p0s_loop(carry, inp, gamma, rho_min, rho_max, c_min, c_max):
+def vtrace_sep_loop(carry, inp, gamma, rho_min, rho_max, c_min, c_max):
     v1, v2, next_values1, next_values2, reward1, reward2, xi1, xi2, \
         last_return1, last_return2, next_q1, next_q2 = carry
     ratio, cur_values, next_done, r_t, main = inp
@@ -301,7 +301,7 @@ def vtrace_2p0s_loop(carry, inp, gamma, rho_min, rho_max, c_min, c_max):
     return carry, (v, q_t, return_t)
 
 
-def vtrace_2p0s(
+def vtrace_sep(
     next_value, ratios, values, rewards, next_dones, mains,
     gamma, rho_min=0.001, rho_max=1.0, c_min=0.001, c_max=1.0, upgo=False,
 ):
@@ -315,7 +315,7 @@ def vtrace_2p0s(
         return1, return2, next_q1, next_q2
 
     _, (targets, q_estimate, return_t) = jax.lax.scan(
-        partial(vtrace_2p0s_loop, gamma=gamma, rho_min=rho_min, rho_max=rho_max, c_min=c_min, c_max=c_max),
+        partial(vtrace_sep_loop, gamma=gamma, rho_min=rho_min, rho_max=rho_max, c_min=c_min, c_max=c_max),
         carry, (ratios, values, next_dones, rewards, mains), reverse=True
     )
     advantages = q_estimate - values
@@ -325,7 +325,7 @@ def vtrace_2p0s(
     return targets, advantages
 
 
-def truncated_gae_upgo_loop(carry, inp, gamma, gae_lambda):
+def truncated_gae_sep_loop(carry, inp, gamma, gae_lambda):
     lastgaelam1, lastgaelam2, next_value1, next_value2, reward1, reward2, \
         done_used1, done_used2, last_return1, last_return2, next_q1, next_q2 = carry
     cur_value, next_done, reward, main = inp
@@ -375,7 +375,7 @@ def truncated_gae_upgo_loop(carry, inp, gamma, gae_lambda):
     return carry, (advantages, returns)
 
 
-def truncated_gae_2p0s(
+def truncated_gae_sep(
     next_value, values, rewards, next_dones, mains, gamma, gae_lambda, upgo,
 ):
     next_value1 = next_value
@@ -390,12 +390,12 @@ def truncated_gae_2p0s(
         done_used1, done_used2, last_return1, last_return2, next_q1, next_q2
 
     _, (advantages, returns) = jax.lax.scan(
-        partial(truncated_gae_upgo_loop, gamma=gamma, gae_lambda=gae_lambda),
+        partial(truncated_gae_sep_loop, gamma=gamma, gae_lambda=gae_lambda),
         carry, (values, next_dones, rewards, mains), reverse=True
     )
+    targets = values + advantages
     if upgo:
         advantages += returns - values
-    targets = values + advantages
     targets = jax.lax.stop_gradient(targets)
     return targets, advantages
 

@@ -2,7 +2,7 @@ import jax
 import jax.numpy as jnp
 
 
-def truncated_gae_2p0s(
+def truncated_gae_sep(
     next_value, values, rewards, next_dones, switch, gamma, gae_lambda, upgo
 ):
     def body_fn(carry, inp):

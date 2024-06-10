@@ -28,9 +28,9 @@ from ygoai.rl.ckpt import ModelCheckpoint, sync_to_gcs, zip_files
 from ygoai.rl.jax.agent import RNNAgent, ModelArgs
 from ygoai.rl.jax.utils import RecordEpisodeStatistics, masked_normalize, categorical_sample
 from ygoai.rl.jax.eval import evaluate, battle
+from ygoai.rl.jax.switch import truncated_gae_sep as gae_sep_switch
 from ygoai.rl.jax import clipped_surrogate_pg_loss, mse_loss, entropy_loss, simple_policy_loss, \
-    ach_loss, policy_gradient_loss, vtrace, vtrace_2p0s, truncated_gae
-from ygoai.rl.jax.switch import truncated_gae_2p0s as gae_2p0s_switch
+    ach_loss, policy_gradient_loss, vtrace, vtrace_sep, truncated_gae, truncated_gae_sep
 
 
 os.environ["XLA_FLAGS"] = "--xla_cpu_multi_thread_eigen=false intra_op_parallelism_threads=1"
@@ -745,21 +745,20 @@ def main():
         if args.switch:
             if args.value == "vtrace" or args.sep_value:
                 raise NotImplementedError
-            target_values, advantages = gae_2p0s_switch(
+            target_values, advantages = gae_sep_switch(
                 next_value, new_values_, rewards, next_dones, switch_or_mains,
                 args.gamma, args.gae_lambda, args.upgo)
         else:
             # TODO: TD(lambda) for multi-step
             ratios_ = reshape_time_series(ratios)
             if args.value == "gae":
-                if args.sep_value:
-                    raise NotImplementedError
-                target_values, advantages = truncated_gae(
+                adv_fn = truncated_gae_sep if args.sep_value else truncated_gae
+                target_values, advantages = adv_fn(
                     next_value, new_values_, rewards, next_dones, switch_or_mains,
                     args.gamma, args.gae_lambda, args.upgo)
             else:
-                vtrace_fn = vtrace_2p0s if args.sep_value else vtrace
-                target_values, advantages = vtrace_fn(
+                adv_fn = vtrace_sep if args.sep_value else vtrace
+                target_values, advantages = adv_fn(
                     next_value, ratios_, new_values_, rewards, next_dones, switch_or_mains, args.gamma,
                     args.rho_clip_min, args.rho_clip_max, args.c_clip_min, args.c_clip_max)
 
