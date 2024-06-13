@@ -19,14 +19,13 @@ import numpy as np
 import optax
 import distrax
 import tyro
-from flax.training.train_state import TrainState
 from rich.pretty import pprint
 from tensorboardX import SummaryWriter
 
 from ygoai.utils import init_ygopro, load_embeddings
 from ygoai.rl.ckpt import ModelCheckpoint, sync_to_gcs, zip_files
 from ygoai.rl.jax.agent import RNNAgent, ModelArgs
-from ygoai.rl.jax.utils import RecordEpisodeStatistics, masked_normalize, categorical_sample
+from ygoai.rl.jax.utils import RecordEpisodeStatistics, masked_normalize, categorical_sample, TrainState
 from ygoai.rl.jax.eval import evaluate, battle
 from ygoai.rl.jax.switch import truncated_gae_sep as gae_sep_switch
 from ygoai.rl.jax import clipped_surrogate_pg_loss, mse_loss, entropy_loss, simple_policy_loss, \
@@ -249,6 +248,14 @@ def create_agent(args, eval=False):
             freeze_id=args.freeze_id,
             **asdict(args.m1),
         )
+
+
+def get_variables(agent_state):
+    batch_stats = getattr(agent_state, "batch_stats", None)
+    variables = {'params': agent_state.params}
+    if batch_stats is not None:
+        variables['batch_stats'] = batch_stats
+    return variables
 
 
 def init_rnn_state(num_envs, rnn_channels):
@@ -502,11 +509,9 @@ def rollout(
             sharded_storage.append(x)
         sharded_storage = Transition(*sharded_storage)
         next_main = main_player == next_to_play
-        next_rstate = jax.tree.map(
-            lambda x1, x2: jnp.where(next_main[:, None], x1, x2), next_rstate1, next_rstate2)
         sharded_data = jax.tree.map(lambda x: jax.device_put_sharded(
                 np.split(x, len(learner_devices)), devices=learner_devices),
-                         (init_rstate1, init_rstate2, (next_obs, next_rstate), next_main))
+                         (init_rstate1, init_rstate2, next_obs, next_main))
 
         if args.eval_interval and update % args.eval_interval == 0:
             _start = time.time()
@@ -683,13 +688,17 @@ def main():
 
     agent = create_agent(args)
     rstate = agent.init_rnn_state(1)
-    params = agent.init(init_key, sample_obs, rstate)
+    variables = agent.init(init_key, sample_obs, rstate)
+    variables = flax.core.unfreeze(variables)
     if embeddings is not None:
         unknown_embed = embeddings.mean(axis=0)
         embeddings = np.concatenate([unknown_embed[None, :], embeddings], axis=0)
-        params = flax.core.unfreeze(params)
-        params['params']['Encoder_0']['Embed_0']['embedding'] = jax.device_put(embeddings)
-        params = flax.core.freeze(params)
+        variables['params']['Encoder_0']['Embed_0']['embedding'] = jax.device_put(embeddings)
+        # variables = flax.core.freeze(variables)
+    if args.checkpoint:
+        with open(args.checkpoint, "rb") as f:
+            variables = flax.serialization.from_bytes(variables, f.read())
+        print(f"loaded checkpoint from {args.checkpoint}")
 
     tx = optax.MultiSteps(
         optax.chain(
@@ -701,29 +710,29 @@ def main():
         every_k_schedule=1,
     )
     tx = optax.apply_if_finite(tx, max_consecutive_errors=10)
+
+    if 'batch_stats' not in variables:
+        # variables = flax.core.unfreeze(variables)
+        variables['batch_stats'] = {}
+        # variables = flax.core.freeze(variables)
     agent_state = TrainState.create(
         apply_fn=None,
-        params=params,
+        params=variables['params'],
         tx=tx,
+        batch_stats=variables['batch_stats'],
     )
-    if args.checkpoint:
-        with open(args.checkpoint, "rb") as f:
-            params = flax.serialization.from_bytes(params, f.read())
-            agent_state = agent_state.replace(params=params)
-        print(f"loaded checkpoint from {args.checkpoint}")
-
     agent_state = flax.jax_utils.replicate(agent_state, devices=learner_devices)
     # print(agent.tabulate(agent_key, sample_obs))
 
     if args.eval_checkpoint:
         eval_agent = create_agent(args, eval=True)
         eval_rstate = eval_agent.init_rnn_state(1)
-        eval_params = eval_agent.init(init_key, sample_obs, eval_rstate)
+        eval_variables = eval_agent.init(init_key, sample_obs, eval_rstate)
         with open(args.eval_checkpoint, "rb") as f:
-            eval_params = flax.serialization.from_bytes(eval_params, f.read())
+            eval_variables = flax.serialization.from_bytes(eval_variables, f.read())
         print(f"loaded eval checkpoint from {args.eval_checkpoint}")
     else:
-        eval_params = None
+        eval_variables = None
 
     def advantage_fn(
         new_logits, new_values, next_dones, switch_or_mains,
@@ -811,17 +820,29 @@ def main():
         loss = pg_loss - args.ent_coef * ent_loss + v_loss * args.vf_coef
         return loss, pg_loss, v_loss, ent_loss, approx_kl
 
-    def apply_fn(params, obs, rstate1, rstate2, dones, next_dones, switch_or_mains):
+    def apply_fn(variables, obs, rstate1, rstate2, dones, next_dones, switch_or_mains):
         if args.switch:
             dones = dones | next_dones
-        (rstate1, rstate2), new_logits, new_values = agent.apply(
-            params, obs, (rstate1, rstate2), dones, switch_or_mains)[:3]
+        ((rstate1, rstate2), new_logits, new_values, _), state_updates = agent.apply(
+            variables, obs, (rstate1, rstate2), dones, switch_or_mains,
+            train=True, mutable=["batch_stats"])
         new_values = jax.tree.map(lambda x: x.squeeze(-1), new_values)
-        return (rstate1, rstate2), new_logits, new_values
+        return ((rstate1, rstate2), new_logits, new_values), state_updates
+
+    def compute_next_value(
+        variables, rstate1, rstate2, next_obs, next_main):
+        rstate = jax.tree.map(
+            lambda x1, x2: jnp.where(next_main[:, None], x1, x2), rstate1, rstate2)
+        next_value = agent.apply(variables, next_obs, rstate)[2]
+        next_value = jax.tree.map(lambda x: x.squeeze(-1), next_value)
+        next_value = jax.lax.stop_gradient(next_value)
+        sign = -1 if args.switch else 1
+        next_value = jnp.where(next_main, sign * next_value, -sign * next_value)
+        return next_value
 
     def compute_advantage(
-        params, rstate1, rstate2, obs, dones, next_dones,
-        switch_or_mains, actions, logits, rewards, next_value):
+        variables, rstate1, rstate2, obs, dones, next_dones,
+        switch_or_mains, actions, logits, rewards, next_obs, next_main):
         segment_length = dones.shape[0]
 
         obs, dones, next_dones, switch_or_mains, actions, logits, rewards = \
@@ -829,8 +850,11 @@ def main():
                 lambda x: jnp.reshape(x, (-1,) + x.shape[2:]),
                 (obs, dones, next_dones, switch_or_mains, actions, logits, rewards))
 
-        new_logits, new_values = apply_fn(
-            params, obs, rstate1, rstate2, dones, next_dones, switch_or_mains)[1:3]
+        ((rstate1, rstate2), new_logits, new_values), state_updates = apply_fn(
+            variables, obs, rstate1, rstate2, dones, next_dones, switch_or_mains)
+
+        next_value = compute_next_value(
+            variables, rstate1, rstate2, next_obs, next_main)
 
         target_values, advantages = advantage_fn(
             new_logits, new_values, next_dones, switch_or_mains,
@@ -842,10 +866,11 @@ def main():
         return target_values, advantages
 
     def compute_loss(
-        params, rstate1, rstate2, obs, dones, next_dones,
+        params, batch_stats, rstate1, rstate2, obs, dones, next_dones,
         switch_or_mains, actions, logits, target_values, advantages, mask):
-        (rstate1, rstate2), new_logits, new_values = apply_fn(
-            params, obs, rstate1, rstate2, dones, next_dones, switch_or_mains)
+        variables = {'params': params, 'batch_stats': batch_stats}
+        ((rstate1, rstate2), new_logits, new_values), state_updates = apply_fn(
+            variables, obs, rstate1, rstate2, dones, next_dones, switch_or_mains)
 
         loss, pg_loss, v_loss, ent_loss, approx_kl = loss_fn(
             new_logits, new_values, actions, logits, target_values, advantages,
@@ -854,14 +879,19 @@ def main():
         loss = jnp.where(jnp.isnan(loss) | jnp.isinf(loss), 0.0, loss)
         approx_kl, rstate1, rstate2 = jax.tree.map(
             jax.lax.stop_gradient, (approx_kl, rstate1, rstate2))
-        return loss, (pg_loss, v_loss, ent_loss, approx_kl, rstate1, rstate2)
+        return loss, (state_updates, pg_loss, v_loss, ent_loss, approx_kl, rstate1, rstate2)
 
     def compute_advantage_loss(
-        params, rstate1, rstate2, obs, dones, next_dones,
-        switch_or_mains, actions, logits, rewards, next_value, mask):
-        num_envs = jax.tree.leaves(next_value)[0].shape[0]
-        new_logits, new_values = apply_fn(
-            params, obs, rstate1, rstate2, dones, next_dones, switch_or_mains)[1:3]
+        params, batch_stats, rstate1, rstate2, obs, dones, next_dones,
+        switch_or_mains, actions, logits, rewards, mask, next_obs, next_main):
+        num_envs = jax.tree.leaves(next_main)[0].shape[0]
+        variables = {'params': params, 'batch_stats': batch_stats}
+        ((rstate1, rstate2), new_logits, new_values), state_updates = apply_fn(
+            variables, obs, rstate1, rstate2, dones, next_dones, switch_or_mains)
+
+        variables = {'params': params, 'batch_stats': state_updates['batch_stats']}
+        next_value = compute_next_value(
+            variables, rstate1, rstate2, next_obs, next_main)
 
         target_values, advantages = advantage_fn(
             new_logits, new_values, next_dones, switch_or_mains,
@@ -873,22 +903,21 @@ def main():
 
         loss = jnp.where(jnp.isnan(loss) | jnp.isinf(loss), 0.0, loss)
         approx_kl = jax.lax.stop_gradient(approx_kl)
-        return loss, (pg_loss, v_loss, ent_loss, approx_kl)
+        return loss, (state_updates, pg_loss, v_loss, ent_loss, approx_kl)
 
     def single_device_update(
         agent_state: TrainState,
         sharded_storages: List,
         sharded_init_rstate1: List,
         sharded_init_rstate2: List,
-        sharded_next_inputs: List,
+        sharded_next_obs: List,
         sharded_next_main: List,
         key: jax.random.PRNGKey,
     ):
         storage = jax.tree.map(lambda *x: jnp.hstack(x), *sharded_storages)
-        # TODO: rstate will be out-date after the first update, maybe consider R2D2
-        next_inputs, init_rstate1, init_rstate2 = [
+        next_obs, init_rstate1, init_rstate2 = [
             jax.tree.map(lambda *x: jnp.concatenate(x), *x)
-            for x in [sharded_next_inputs, sharded_init_rstate1, sharded_init_rstate2]
+            for x in [sharded_next_obs, sharded_init_rstate1, sharded_init_rstate2]
         ]
         next_main = jnp.concatenate(sharded_next_main)
 
@@ -913,49 +942,45 @@ def main():
             agent_state, key = carry
             key, subkey = jax.random.split(key)
 
-            next_value = agent.apply(agent_state.params, *next_inputs)[2]
-            next_value = jax.tree.map(lambda x: jnp.squeeze(x, axis=-1), next_value)
-            sign = -1 if args.switch else 1
-            next_value = jnp.where(next_main, sign * next_value, -sign * next_value)
-
             def convert_data(x: jnp.ndarray, multi_step=True):
                 key = subkey if args.update_epochs > 1 else None
                 return reshape_minibatch(
                     x, multi_step, args.num_minibatches, num_steps, args.segment_length, key=key)
 
-            shuffled_init_rstate1, shuffled_init_rstate2 = jax.tree.map(
-                partial(convert_data, multi_step=False), (init_rstate1, init_rstate2))
-            shuffled_storage = jax.tree.map(convert_data, storage)
+            b_init_rstate1, b_init_rstate2, b_next_obs, b_next_main = \
+                jax.tree.map(partial(convert_data, multi_step=False),
+                             (init_rstate1, init_rstate2, next_obs, next_main))
+            b_storage = jax.tree.map(convert_data, storage)
             if args.switch:
                 switch_or_mains = convert_data(switch)
             else:
-                switch_or_mains = shuffled_storage.mains
-            shuffled_mask = ~shuffled_storage.dones
-            shuffled_next_value = jax.tree.map(
-                partial(convert_data, multi_step=False), next_value)
-            shuffled_rewards = shuffled_storage.rewards
+                switch_or_mains = b_storage.mains
+            b_mask = ~b_storage.dones
+            b_rewards = b_storage.rewards
 
             if args.segment_length is None:
                 def update_minibatch(agent_state, minibatch):
-                    (loss, (pg_loss, v_loss, ent_loss, approx_kl)), grads = loss_grad_fn(
-                        agent_state.params, *minibatch)
+                    (loss, (state_updates, pg_loss, v_loss, ent_loss, approx_kl)), grads = \
+                        loss_grad_fn(agent_state.params, agent_state.batch_stats, *minibatch)
                     grads = jax.lax.pmean(grads, axis_name="local_devices")
                     agent_state = agent_state.apply_gradients(grads=grads)
+                    agent_state = agent_state.replace(batch_stats=state_updates['batch_stats'])
                     return agent_state, (loss, pg_loss, v_loss, ent_loss, approx_kl)
             else:
                 def update_minibatch(carry, minibatch):
                     def update_minibatch_t(carry, minibatch_t):
                         agent_state, rstate1, rstate2 = carry
                         minibatch_t = rstate1, rstate2, *minibatch_t
-                        (loss, (pg_loss, v_loss, ent_loss, approx_kl, rstate1, rstate2)), \
-                            grads = loss_grad_fn(agent_state.params, *minibatch_t)
+                        (loss, (state_updates, pg_loss, v_loss, ent_loss, approx_kl, rstate1, rstate2)), \
+                            grads = loss_grad_fn(agent_state.params, agent_state.batch_stats, *minibatch_t)
                         grads = jax.lax.pmean(grads, axis_name="local_devices")
                         agent_state = agent_state.apply_gradients(grads=grads)
+                        agent_state = agent_state.replace(batch_stats=state_updates['batch_stats'])
                         return (agent_state, rstate1, rstate2), (loss, pg_loss, v_loss, ent_loss, approx_kl)
 
                     rstate1, rstate2, *minibatch_t, mask = minibatch
                     target_values, advantages = compute_advantage(
-                        carry.params, rstate1, rstate2, *minibatch_t)
+                        get_variables(carry), rstate1, rstate2, *minibatch_t)
                     minibatch_t = *minibatch_t[:-2], target_values, advantages, mask
 
                     (carry, _rstate1, _rstate2), \
@@ -967,17 +992,18 @@ def main():
                 update_minibatch,
                 agent_state,
                 (
-                    shuffled_init_rstate1,
-                    shuffled_init_rstate2,
-                    shuffled_storage.obs,
-                    shuffled_storage.dones,
-                    shuffled_storage.next_dones,
+                    b_init_rstate1,
+                    b_init_rstate2,
+                    b_storage.obs,
+                    b_storage.dones,
+                    b_storage.next_dones,
                     switch_or_mains,
-                    shuffled_storage.actions,
-                    shuffled_storage.logits,
-                    shuffled_rewards,
-                    shuffled_next_value,
-                    shuffled_mask,
+                    b_storage.actions,
+                    b_storage.logits,
+                    b_rewards,
+                    b_mask,
+                    b_next_obs,
+                    b_next_main,
                 ),
             )
             return (agent_state, key), (loss, pg_loss, v_loss, ent_loss, approx_kl)
@@ -1007,16 +1033,16 @@ def main():
     params_queues = []
     rollout_queues = []
 
-    unreplicated_params = flax.jax_utils.unreplicate(agent_state.params)
+    unreplicated_params = flax.jax_utils.unreplicate(get_variables(agent_state))
     for d_idx, d_id in enumerate(args.actor_device_ids):
         actor_device = local_devices[d_id]
         device_params = jax.device_put(unreplicated_params, actor_device)
         for thread_id in range(args.num_actor_threads):
             params_queues.append(queue.Queue(maxsize=1))
             rollout_queues.append(queue.Queue(maxsize=1))
-            if eval_params:
+            if eval_variables:
                 params_queues[-1].put(
-                    jax.device_put(eval_params, actor_device))
+                    jax.device_put(eval_variables, actor_device))
             actor_thread_id = d_idx * args.num_actor_threads + thread_id             
             threading.Thread(
                 target=rollout,
@@ -1070,7 +1096,7 @@ def main():
             *list(zip(*sharded_data_list)),
             learner_keys,
         )
-        unreplicated_params = flax.jax_utils.unreplicate(agent_state.params)
+        unreplicated_params = flax.jax_utils.unreplicate(get_variables(agent_state))
         params_queue_put_time = 0
         for d_idx, d_id in enumerate(args.actor_device_ids):
             device_params = jax.device_put(unreplicated_params, local_devices[d_id])

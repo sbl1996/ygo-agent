@@ -8,7 +8,7 @@ import jax.numpy as jnp
 import flax.linen as nn
 
 from ygoai.rl.jax.transformer import EncoderLayer, PositionalEncoding, LlamaEncoderLayer
-from ygoai.rl.jax.modules import MLP, GLUMlp, RMSNorm, make_bin_params, bytes_to_bin, decode_id
+from ygoai.rl.jax.modules import MLP, GLUMlp, BatchRenorm, make_bin_params, bytes_to_bin, decode_id
 from ygoai.rl.jax.rwkv import Rwkv6SelfAttention
 
 
@@ -487,11 +487,38 @@ class Critic(nn.Module):
     param_dtype: jnp.dtype = jnp.float32
     
     @nn.compact
-    def __call__(self, f_state):
+    def __call__(self, f_state, train):
         f_state = f_state.astype(self.dtype)
         mlp = partial(MLP, dtype=self.dtype, param_dtype=self.param_dtype)
         x = mlp(self.channels, last_lin=False)(f_state)
         x = nn.Dense(1, dtype=jnp.float32, param_dtype=self.param_dtype, kernel_init=nn.initializers.orthogonal(1.0))(x)
+        return x
+
+
+class CrossCritic(nn.Module):
+    channels: Sequence[int] = (128, 128, 128)
+    # dropout_rate: Optional[float] = None
+    batch_norm_momentum: float = 0.99
+    dtype: Optional[jnp.dtype] = None
+    param_dtype: jnp.dtype = jnp.float32
+    
+    @nn.compact
+    def __call__(self, f_state, train):
+        x = f_state.astype(self.dtype)
+        linear = partial(nn.Dense, dtype=self.dtype, param_dtype=self.param_dtype, use_bias=False)
+        BN = partial(
+            BatchRenorm, dtype=self.dtype, param_dtype=self.param_dtype,
+            momentum=self.batch_norm_momentum, axis_name="local_devices",
+            use_running_average=not train)
+        x = BN()(x)
+        for c in self.channels:
+            x = linear(c)(x)
+            # if self.use_layer_norm:
+            #     x = nn.LayerNorm()(x)
+            x = nn.relu()(x)
+            # x = nn.leaky_relu(x, negative_slope=0.1)
+            x = BN()(x)
+        x = nn.Dense(1, dtype=jnp.float32, param_dtype=self.param_dtype)(x)
         return x
 
 
@@ -580,6 +607,14 @@ class ModelArgs(EncoderArgs):
     """whether to use FiLM for the actor"""
     oppo_info: bool = False
     """whether to use opponent's information"""
+    rnn_shortcut: bool = False
+    """whether to use shortcut for the RNN"""
+    batch_norm: bool = False
+    """whether to use batch normalization for the critic"""
+    critic_width: int = 128
+    """the width of the critic"""
+    critic_depth: int = 3
+    """the depth of the critic"""
     rwkv_head_size: int = 32
     """the head size for the RWKV"""
 
@@ -596,6 +631,10 @@ class RNNAgent(nn.Module):
     rwkv_head_size: int = 32
     action_feats: bool = True
     oppo_info: bool = False
+    rnn_shortcut: bool = False
+    batch_norm: bool = False
+    critic_width: int = 128
+    critic_depth: int = 3
     version: int = 0
 
     switch: bool = True
@@ -606,7 +645,7 @@ class RNNAgent(nn.Module):
     param_dtype: jnp.dtype = jnp.float32
 
     @nn.compact
-    def __call__(self, x, rstate, done=None, switch_or_main=None):
+    def __call__(self, x, rstate, done=None, switch_or_main=None, train=False):
         batch_size = jax.tree.leaves(rstate)[0].shape[0]
 
         c = self.num_channels
@@ -669,6 +708,10 @@ class RNNAgent(nn.Module):
                 rstate, f_state_r = rnn_step_by_main(
                     rnn_layer, rstate, f_state, done, switch_or_main)
 
+        if self.rnn_shortcut:
+            # f_state_r = ReZero(channel_wise=True)(f_state_r)
+            f_state_r = jnp.concatenate([f_state, f_state_r], axis=-1)
+
         if self.film:
             actor = FiLMActor(
                 channels=c, dtype=jnp.float32, param_dtype=self.param_dtype, noam=self.noam)
@@ -694,13 +737,16 @@ class RNNAgent(nn.Module):
                     lambda x1, x2: jnp.where(main, x2, x1), rstate1, rstate2)
             value = critic(rstate1_t, rstate2_t, f_g)
         else:
-            critic = Critic(
-                channels=[c, c, c], dtype=self.dtype, param_dtype=self.param_dtype)
-            value = critic(f_state_r)
-        
+            CriticCls = CrossCritic if self.batch_norm else Critic
+            cs = [self.critic_width] * self.critic_depth
+            critic = CriticCls(
+                channels=cs, dtype=self.dtype, param_dtype=self.param_dtype)
+            value = critic(f_state_r, train)
+
         if self.int_head:
+            cs = [self.critic_width] * self.critic_depth
             critic_int = Critic(
-                channels=[c, c, c], dtype=self.dtype, param_dtype=self.param_dtype)
+                channels=cs, dtype=self.dtype, param_dtype=self.param_dtype)
             value_int = critic_int(f_state_r)
             value = (value, value_int)
         return rstate, logits, value, valid

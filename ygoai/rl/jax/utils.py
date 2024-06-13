@@ -1,5 +1,12 @@
+from typing import Any, Callable
+
 import jax
 import jax.numpy as jnp
+
+from flax import core, struct
+from flax.linen.fp8_ops import OVERWRITE_WITH_GRADIENT
+
+import optax
 
 import numpy as np
 
@@ -67,3 +74,72 @@ def update_mean_var_count_from_moments(
     new_count = tot_count
 
     return new_mean, new_var, new_count
+
+
+class TrainState(struct.PyTreeNode):
+    step: int
+    apply_fn: Callable = struct.field(pytree_node=False)
+    params: core.FrozenDict[str, Any] = struct.field(pytree_node=True)
+    tx: optax.GradientTransformation = struct.field(pytree_node=False)
+    opt_state: optax.OptState = struct.field(pytree_node=True)
+    batch_stats: core.FrozenDict[str, Any] = struct.field(pytree_node=True)
+
+    def apply_gradients(self, *, grads, **kwargs):
+        """Updates ``step``, ``params``, ``opt_state`` and ``**kwargs`` in return value.
+
+        Note that internally this function calls ``.tx.update()`` followed by a call
+        to ``optax.apply_updates()`` to update ``params`` and ``opt_state``.
+
+        Args:
+            grads: Gradients that have the same pytree structure as ``.params``.
+            **kwargs: Additional dataclass attributes that should be ``.replace()``-ed.
+
+        Returns:
+            An updated instance of ``self`` with ``step`` incremented by one, ``params``
+            and ``opt_state`` updated by applying ``grads``, and additional attributes
+            replaced as specified by ``kwargs``.
+        """
+        if OVERWRITE_WITH_GRADIENT in grads:
+            grads_with_opt = grads['params']
+            params_with_opt = self.params['params']
+        else:
+            grads_with_opt = grads
+            params_with_opt = self.params
+
+        updates, new_opt_state = self.tx.update(
+            grads_with_opt, self.opt_state, params_with_opt
+        )
+        new_params_with_opt = optax.apply_updates(params_with_opt, updates)
+
+        # As implied by the OWG name, the gradients are used directly to update the
+        # parameters.
+        if OVERWRITE_WITH_GRADIENT in grads:
+            new_params = {
+                'params': new_params_with_opt,
+                OVERWRITE_WITH_GRADIENT: grads[OVERWRITE_WITH_GRADIENT],
+            }
+        else:
+            new_params = new_params_with_opt
+            return self.replace(
+            step=self.step + 1,
+            params=new_params,
+            opt_state=new_opt_state,
+            **kwargs,
+        )
+
+    @classmethod
+    def create(cls, *, apply_fn, params, tx, **kwargs):
+        """Creates a new instance with ``step=0`` and initialized ``opt_state``."""
+        # We exclude OWG params when present because they do not need opt states.
+        params_with_opt = (
+            params['params'] if OVERWRITE_WITH_GRADIENT in params else params
+        )
+        opt_state = tx.init(params_with_opt)
+        return cls(
+            step=0,
+            apply_fn=apply_fn,
+            params=params,
+            tx=tx,
+            opt_state=opt_state,
+            **kwargs,
+        )
