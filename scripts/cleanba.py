@@ -329,7 +329,7 @@ def advantage_fn(
             return adv_fn(
                 next_v, ratios, values, rewards, next_dones, switch_or_mains, args.gamma,
                 args.rho_clip_min, args.rho_clip_max, args.c_clip_min, args.c_clip_max,
-                return_carry=return_carry)
+                args.upgo, return_carry=return_carry)
 
 
 def rollout(
