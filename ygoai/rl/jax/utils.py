@@ -10,8 +10,6 @@ import optax
 
 import numpy as np
 
-from ygoai.rl.env import RecordEpisodeStatistics
-
 
 def masked_mean(x, valid):
     x = jnp.where(valid, x, jnp.zeros_like(x))

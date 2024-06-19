@@ -60,15 +60,40 @@ class RecordEpisodeStatistics(gym.Wrapper):
 class CompatEnv(gym.Wrapper):
 
     def reset(self, **kwargs):
-        observations, infos = super().reset(**kwargs)
+        observations, infos = self.env.reset(**kwargs)
         return observations, infos
 
     def step(self, action):
-        observations, rewards, terminated, truncated, infos = self.env.step(action)
+        observations, rewards, terminated, truncated, infos = super().step(action)
         dones = np.logical_or(terminated, truncated)
         return (
             observations,
             rewards,
             dones,
+            infos,
+        )
+
+
+class EnvPreprocess(gym.Wrapper):
+
+    def __init__(self, env, skip_mask):
+        super().__init__(env)
+        self.skip_mask = skip_mask
+
+    def reset(self, **kwargs):
+        observations, infos = self.env.reset(**kwargs)
+        if self.skip_mask:
+            observations['mask_'] = None
+        return observations, infos
+
+    def step(self, action):
+        observations, rewards, terminated, truncated, infos = super().step(action)
+        if self.skip_mask:
+            observations['mask_'] = None
+        return (
+            observations,
+            rewards,
+            terminated,
+            truncated,
             infos,
         )

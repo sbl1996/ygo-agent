@@ -1540,7 +1540,7 @@ public:
             Spec<uint8_t>({conf["max_options"_], n_action_feats})),
         "obs:h_actions_"_.Bind(
             Spec<uint8_t>({conf["n_history_actions"_], n_action_feats + 2})),
-        "obs:g_cards_"_.Bind(Spec<uint8_t>({conf["max_cards"_] * 2, 41})),
+        "obs:mask_"_.Bind(Spec<uint8_t>({conf["max_cards"_] * 2, 14})),
         "info:num_options"_.Bind(Spec<int>({}, {0, conf["max_options"_] - 1})),
         "info:to_play"_.Bind(Spec<int>({}, {0, 1})),
         "info:is_selfplay"_.Bind(Spec<int>({}, {0, 1})),
@@ -2337,9 +2337,18 @@ public:
       return;
     }
 
-    auto [spec_infos, loc_n_cards] = _set_obs_cards(state["obs:cards_"_], to_play_);
+    SpecInfos spec_infos;
+    std::vector<int> loc_n_cards;
+
     if (spec_.config["oppo_info"_]) {
-      _set_obs_g_cards(state["obs:g_cards_"_]);
+      _set_obs_g_cards(state["obs:cards_"_], to_play_);
+      auto [spec_infos_, loc_n_cards_] = _set_obs_mask(state["obs:mask_"_], to_play_);
+      spec_infos = spec_infos_;
+      loc_n_cards = loc_n_cards_;
+    } else {
+      auto [spec_infos_, loc_n_cards_] = _set_obs_cards(state["obs:cards_"_], to_play_);
+      spec_infos = spec_infos_;
+      loc_n_cards = loc_n_cards_;
     }
 
     _set_obs_global(state["obs:global_"_], to_play_, loc_n_cards);
@@ -2448,27 +2457,85 @@ private:
     return {spec_infos, loc_n_cards};
   }
 
-  void _set_obs_g_cards(TArray<uint8_t> &f_cards) {
+  void _set_obs_g_cards(TArray<uint8_t> &f_cards, PlayerId to_play) {
     int offset = 0;
     for (auto pi = 0; pi < 2; pi++) {
+      const PlayerId player = (to_play + pi) % 2;
       std::vector<uint8_t> configs = {
           LOCATION_DECK, LOCATION_HAND, LOCATION_MZONE,
           LOCATION_SZONE, LOCATION_GRAVE, LOCATION_REMOVED,
           LOCATION_EXTRA,
       };
       for (auto location : configs) {
-        std::vector<Card> cards = get_cards_in_location(pi, location);
+        std::vector<Card> cards = get_cards_in_location(player, location);
         int n_cards = cards.size();
         for (int i = 0; i < n_cards; ++i) {
           const auto &c = cards[i];
           CardId card_id = c_get_card_id(c.code_);
           _set_obs_card_(f_cards, offset, c, false, card_id, false);
           offset++;
+          if (offset == (spec_.config["max_cards"_] * 2 - 1)) {
+            return;
+          }
         }
       }
     }
   }
 
+  std::tuple<SpecInfos, std::vector<int>> _set_obs_mask(TArray<uint8_t> &mask, PlayerId to_play) {
+    SpecInfos spec_infos;
+    std::vector<int> loc_n_cards;
+    int offset = 0;
+    for (auto pi = 0; pi < 2; pi++) {
+      const PlayerId player = (to_play + pi) % 2;
+      const bool opponent = pi == 1;
+      std::vector<std::pair<uint8_t, bool>> configs = {
+          {LOCATION_DECK, true},   {LOCATION_HAND, true},
+          {LOCATION_MZONE, false}, {LOCATION_SZONE, false},
+          {LOCATION_GRAVE, false}, {LOCATION_REMOVED, false},
+          {LOCATION_EXTRA, true},
+      };
+      for (auto &[location, hidden_for_opponent] : configs) {
+        // check this
+        if (opponent && (revealed_.size() != 0)) {
+          hidden_for_opponent = false;
+        }
+        if (opponent && hidden_for_opponent) {
+          auto n_cards = YGO_QueryFieldCount(pduel_, player, location);
+          loc_n_cards.push_back(n_cards);
+          for (auto i = 0; i < n_cards; i++) {
+            mask(offset, 1) = 1;
+            mask(offset, 3) = 1;
+            offset++;
+          }
+        } else {
+          std::vector<Card> cards = get_cards_in_location(player, location);
+          int n_cards = cards.size();
+          loc_n_cards.push_back(n_cards);
+          for (int i = 0; i < n_cards; ++i) {
+            const auto &c = cards[i];
+            auto spec = c.get_spec(opponent);
+            bool hide = false;
+            if (opponent) {
+              hide = c.position_ & POS_FACEDOWN;
+              if (revealed_.find(spec) != revealed_.end()) {
+                hide = false;
+              }
+            }
+            CardId card_id = 0;
+            if (!hide) {
+              card_id = c_get_card_id(c.code_);
+            }
+            _set_obs_mask_(mask, offset, c, hide);
+            offset++;
+
+            spec_infos[spec] = {static_cast<uint16_t>(offset), card_id};
+          }
+        }
+      }
+    }
+    return {spec_infos, loc_n_cards};
+  }
 
   void _set_obs_card_(TArray<uint8_t> &f_cards, int offset, const Card &c,
                       bool hide, CardId card_id = 0, bool global = false) {
@@ -2528,6 +2595,54 @@ private:
       for (int j = 0; j < type_ids.size(); ++j) {
         f_cards(offset, 16 + j) = type_ids[j];
       }
+    }
+  }
+
+  void _set_obs_mask_(TArray<uint8_t> &mask, int offset, const Card &c,
+                      bool hide, CardId card_id = 0, bool global = false) {
+    // check offset exceeds max_cards
+    uint8_t location = c.location_;
+    bool overlay = location & LOCATION_OVERLAY;
+    if (overlay) {
+      location = location & 0x7f;
+    }
+    if (overlay) {
+      hide = false;
+    }
+
+    if (!hide) {
+      if (card_id != 0) {
+        mask(offset, 0) = 1;
+      }
+    }
+    mask(offset, 1) = 1;
+
+    if (location == LOCATION_MZONE || location == LOCATION_SZONE ||
+        location == LOCATION_GRAVE) {
+      mask(offset, 2) = 1;
+    }
+    mask(offset, 3) = 1;
+    if (overlay) {
+      mask(offset, 4) = 1;
+      mask(offset, 5) = 1;
+    } else {
+      if (location == LOCATION_DECK || location == LOCATION_HAND || location == LOCATION_EXTRA) {
+        if (hide || (c.position_ & POS_FACEDOWN)) {
+          mask(offset, 4) = 1;
+        }
+      } else {
+        mask(offset, 4) = 1;
+      }
+    }
+    if (!hide) {
+      mask(offset, 6) = 1;
+      mask(offset, 7) = 1;
+      mask(offset, 8) = 1;
+      mask(offset, 9) = 1;
+      mask(offset, 10) = 1;
+      mask(offset, 11) = 1;
+      mask(offset, 12) = 1;
+      mask(offset, 13) = 1;
     }
   }
 
