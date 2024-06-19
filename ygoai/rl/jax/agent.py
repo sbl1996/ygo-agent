@@ -82,6 +82,7 @@ class CardEncoder(nn.Module):
     channels: int = 128
     dtype: Optional[jnp.dtype] = None
     param_dtype: jnp.dtype = jnp.float32
+    oppo_info: bool = False
     version: int = 0
 
     @nn.compact
