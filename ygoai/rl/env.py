@@ -78,6 +78,7 @@ class EnvPreprocess(gym.Wrapper):
 
     def __init__(self, env, skip_mask):
         super().__init__(env)
+        self.num_envs = env.num_envs
         self.skip_mask = skip_mask
 
     def reset(self, **kwargs):
