@@ -1003,9 +1003,8 @@ def main():
             key, subkey = jax.random.split(key)
 
             def convert_data(x: jnp.ndarray, multi_step=True):
-                key = subkey if args.update_epochs > 1 else None
                 return reshape_minibatch(
-                    x, multi_step, args.num_minibatches, num_steps, args.segment_length, key=key)
+                    x, multi_step, args.num_minibatches, num_steps, args.segment_length, key=subkey)
 
             b_init_rstate, b_next_data = \
                 jax.tree.map(partial(convert_data, multi_step=False),
