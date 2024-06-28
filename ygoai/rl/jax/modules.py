@@ -154,7 +154,7 @@ class BatchRenorm(nn.Module):
             more details.
         use_fast_variance: If true, use a faster, but less numerically stable,
             calculation for the variance.
-  """
+    """
 
     use_running_average: Optional[bool] = None
     axis: int = -1

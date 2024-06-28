@@ -1528,7 +1528,7 @@ public:
                     "max_cards"_.Bind(80), "n_history_actions"_.Bind(16),
                     "record"_.Bind(false), "async_reset"_.Bind(false),
                     "greedy_reward"_.Bind(true), "timeout"_.Bind(600),
-                    "oppo_info"_.Bind(false));
+                    "oppo_info"_.Bind(false), "max_steps"_.Bind(1000));
   }
   template <typename Config>
   static decltype(auto) StateSpec(const Config &conf) {
@@ -1629,6 +1629,7 @@ protected:
 
   std::uniform_int_distribution<uint64_t> dist_int_;
   bool done_{true};
+  long step_count_{0};
   bool duel_started_{false};
   uint32_t eng_flag_{0};
 
@@ -1947,6 +1948,7 @@ public:
     discard_hand_ = false;
 
     done_ = false;
+    step_count_ = 0;
 
     // update_time_stat(_start, reset_time_count_, reset_time_2_);
     // _start = clock();
@@ -2227,6 +2229,14 @@ public:
       next();
     }
 
+    step_count_++;
+    if (!done_ && (step_count_ >= spec_.config["max_steps"_])) {
+      PlayerId winner = lp_[0] > lp_[1] ? 0 : 1;
+      _duel_end(winner, 0x01);
+      done_ = true;
+      legal_actions_.clear();
+    }
+
     float reward = 0;
     int reason = 0;
     if (done_) {
@@ -2334,6 +2344,9 @@ public:
     if (n_options == 0) {
       state["info:num_options"_] = 1;
       state["obs:global_"_][22] = uint8_t(1);
+      // if (step_count_ >= spec_.config["max_steps"_]) {
+      //   fmt::println("Max steps reached return");
+      // }
       return;
     }
 

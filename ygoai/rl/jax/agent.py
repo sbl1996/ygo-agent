@@ -452,13 +452,14 @@ class Actor(nn.Module):
     channels: int = 128
     dtype: Optional[jnp.dtype] = None
     param_dtype: jnp.dtype = jnp.float32
-    
+    final_init: nn.initializers.Initializer = nn.initializers.orthogonal(0.01)
+
     @nn.compact
     def __call__(self, f_state, f_actions, mask):
         f_state = f_state.astype(self.dtype)
         f_actions = f_actions.astype(self.dtype)
         c = self.channels
-        mlp = partial(MLP, dtype=jnp.float32, param_dtype=self.param_dtype, last_kernel_init=nn.initializers.orthogonal(0.01))
+        mlp = partial(MLP, dtype=jnp.float32, param_dtype=self.param_dtype, last_kernel_init=self.final_init)
         f_state = mlp((c,), use_bias=True)(f_state)
         logits = jnp.einsum('bc,bnc->bn', f_state, f_actions)
         big_neg = jnp.finfo(logits.dtype).min
@@ -471,6 +472,7 @@ class FiLMActor(nn.Module):
     dtype: Optional[jnp.dtype] = None
     param_dtype: jnp.dtype = jnp.float32
     noam: bool = False
+    final_init: nn.initializers.Initializer = nn.initializers.orthogonal(0.01)
 
     @nn.compact
     def __call__(self, f_state, f_actions, mask):
@@ -486,7 +488,7 @@ class FiLMActor(nn.Module):
             f_actions, mask, a_s, a_b, o_s, o_b)
 
         logits = nn.Dense(1, dtype=jnp.float32, param_dtype=self.param_dtype,
-                          kernel_init=nn.initializers.orthogonal(0.01))(f_actions)[:, :, 0]
+                          kernel_init=self.final_init)(f_actions)[:, :, 0]
         big_neg = jnp.finfo(logits.dtype).min
         logits = jnp.where(mask, big_neg, logits)
         return logits
@@ -647,6 +649,7 @@ class RNNAgent(nn.Module):
     critic_depth: int = 3
     version: int = 0
 
+    q_head: bool = False
     switch: bool = True
     freeze_id: bool = False
     int_head: bool = False
@@ -699,11 +702,6 @@ class RNNAgent(nn.Module):
             num_steps = f_state.shape[0] // batch_size
             multi_step = num_steps > 1
 
-            if done is not None:
-                assert switch_or_main is not None
-            else:
-                assert not multi_step
-
             if multi_step:
                 f_state_r, done, switch_or_main = jax.tree.map(
                     lambda x: jnp.reshape(x, (num_steps, batch_size) + x.shape[1:]), (f_state, done, switch_or_main))
@@ -722,13 +720,16 @@ class RNNAgent(nn.Module):
             # f_state_r = ReZero(channel_wise=True)(f_state_r)
             f_state_r = jnp.concatenate([f_state, f_state_r], axis=-1)
 
+        actor_init = nn.initializers.orthogonal(1) if self.q_head else nn.initializers.orthogonal(0.01)
         if self.film:
             actor = FiLMActor(
-                channels=c, dtype=jnp.float32, param_dtype=self.param_dtype, noam=self.noam)
+                channels=c, dtype=jnp.float32, param_dtype=self.param_dtype, noam=self.noam, final_init=actor_init)
         else:
             actor = Actor(
-                channels=c, dtype=jnp.float32, param_dtype=self.param_dtype)
+                channels=c, dtype=jnp.float32, param_dtype=self.param_dtype, final_init=actor_init)
         logits = actor(f_state_r, f_actions, mask)
+        if self.q_head:
+            return rstate, logits, valid
 
         CriticCls = CrossCritic if self.batch_norm else Critic
         cs = [self.critic_width] * self.critic_depth

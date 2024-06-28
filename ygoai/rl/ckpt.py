@@ -1,4 +1,7 @@
+from typing import List
+
 import os
+import shutil
 from pathlib import Path
 import zipfile
 
@@ -16,10 +19,10 @@ class ModelCheckpoint(object):
     """
 
     def __init__(self, dirname, save_fn, n_saved=1):
-        self._dirname = Path(dirname).expanduser()
+        self._dirname = Path(dirname).expanduser().absolute()
         self._n_saved = n_saved
         self._save_fn = save_fn
-        self._saved = []
+        self._saved: List[Path] = []
 
     def _check_dir(self):
         self._dirname.mkdir(parents=True, exist_ok=True)
@@ -38,7 +41,10 @@ class ModelCheckpoint(object):
 
         if len(self._saved) > self._n_saved:
             path = self._saved.pop(0)
-            os.remove(path)
+            if path.is_dir():
+                shutil.rmtree(path)
+            else:
+                os.remove(path)
     
     def get_latest(self):
         path = self._saved[-1]
