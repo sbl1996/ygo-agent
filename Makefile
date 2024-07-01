@@ -1,6 +1,6 @@
 SCRIPTS_REPO := "https://github.com/mycard/ygopro-scripts.git"
 SCRIPTS_DIR := "../ygopro-scripts"
-DATABASE_REPO := "https://github.com/mycard/ygopro-database/raw/master/locales"
+DATABASE_REPO := "https://github.com/mycard/ygopro-database/raw/f288cd7d353467eb3816babcbb04620e11f64e8a/locales"
 LOCALES := en zh
 
 .PHONY: all assets script py_install ygoenv_so
@@ -20,6 +20,7 @@ script : scripts/script
 
 scripts/script:
 	if [ ! -d $(SCRIPTS_DIR) ] ; then git clone $(SCRIPTS_REPO) $(SCRIPTS_DIR); fi
+	cd $(SCRIPTS_DIR) && git checkout 44eff41f
 	ln -sf "../$(SCRIPTS_DIR)" scripts/script
 
 assets: $(LOCALES)
@@ -30,13 +31,13 @@ assets/locale/en assets/locale/zh:
 	mkdir -p $@
 
 assets/locale/en/cards.cdb: assets/locale/en
-	wget $(DATABASE_REPO)/en-US/cards.cdb -O $@
+	wget -nv $(DATABASE_REPO)/en-US/cards.cdb -O $@
 
 assets/locale/en/strings.conf: assets/locale/en
-	wget $(DATABASE_REPO)/en-US/strings.conf -O $@
+	wget -nv $(DATABASE_REPO)/en-US/strings.conf -O $@
 
 assets/locale/zh/cards.cdb: assets/locale/zh
-	wget $(DATABASE_REPO)/zh-CN/cards.cdb -O $@
+	wget -nv $(DATABASE_REPO)/zh-CN/cards.cdb -O $@
 
 assets/locale/zh/strings.conf: assets/locale/zh
-	wget $(DATABASE_REPO)/zh-CN/strings.conf -O $@
+	wget -nv $(DATABASE_REPO)/zh-CN/strings.conf -O $@

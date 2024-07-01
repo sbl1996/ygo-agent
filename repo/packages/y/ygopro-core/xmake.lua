@@ -3,6 +3,7 @@ package("ygopro-core")
     set_homepage("https://github.com/Fluorohydride/ygopro-core")
 
     set_urls("https://github.com/Fluorohydride/ygopro-core.git")
+    add_versions("0.0.1", "6ed45241ab9360fd832dbc5fe913aa0017f577fc")
 
     add_deps("lua")
 
