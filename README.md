@@ -2,7 +2,11 @@
 
 YGO Agent is a project to create a Yu-Gi-Oh! AI using deep learning (LLMs, RL). It consists of a game environment and a set of AI agents.
 
+[Discord](https://discord.gg/EqWYj4G4Ys)
+
 ## News
+
+- July 2, 2024: We have a discord channel for discussion now! We are also working with [neos-ts](https://github.com/DarkNeos/neos-ts) to implement human-AI battle.
 
 - April 18, 2024: We have fully switched to JAX for training and evaluation. Check the evaluation sections for more details and try the new JAX-trained agents.
 
@@ -80,8 +84,8 @@ Sometimes you may fail to install the required libraries by xmake automatically 
 #### GLIBC and GLIBCXX version conflict
 Mostly, it is because your `libstdc++` from `$CONDA_PREFIX` is older than the system one, while xmake compiles libraries with the system one and you run programs with the `$CONDA_PREFIX` one. If so, you can delete the old `libstdc++` from `$CONDA_PREFIX` (backup it first) and make a soft link to the system one.
 
-#### Other xmake issues
-Open a new terminal and try again. God bless you.
+#### Other issues
+Open a new terminal and try again. If you still encounter issues, you can join the [Discord channel](https://discord.gg/EqWYj4G4Ys) for help.
 
 
 ## Evaluation
@@ -188,7 +192,8 @@ The script options are mostly the same as the single GPU training. We only scale
 ## Plan
 
 ### Environment
-- Fix information leak in the history actions
+- Generation of yrpX replay files
+- Support EDOPro
 
 ### Training
 - League training (AlphaStar, ROA-Star)
@@ -202,6 +207,7 @@ The script options are mostly the same as the single GPU training. We only scale
 
 ### Documentation
 - JAX training
+- Custom cards
 
 
 ## Sponsors
