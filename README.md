@@ -12,7 +12,7 @@ YGO Agent is a project to create a Yu-Gi-Oh! AI using deep learning (LLMs, RL). 
 
 - April 14, 2024: LSTM has been implemented and well tested. See `scripts/jax/ppo.py` for more details.
 
-- April 7, 2024: We have switched to JAX for training and evalution due to the better performance and flexibility. The scripts are in the `scripts/jax` directory. The documentation is in progress. PyTorch scripts are still available in the `scripts` directory, but they are not maintained.
+- April 7, 2024: We have switched to JAX for training and evaluation due to the better performance and flexibility. The scripts are in the `scripts/jax` directory. The documentation is in progress. PyTorch scripts are still available in the `scripts` directory, but they are not maintained.
 
 
 ## Table of Contents
