@@ -3,7 +3,7 @@ add_rules("mode.debug", "mode.release")
 add_repositories("my-repo repo")
 
 add_requires(
-    "ygopro-core", "edopro-core", "pybind11 2.10.*", "fmt 10.2.*", "glog 0.6.0",
+    "ygopro-core", "edopro-core", "pybind11 2.13.*", "fmt 10.2.*", "glog 0.6.0",
     "sqlite3 3.43.0+200", "concurrentqueue 1.0.4", "unordered_dense 4.4.*",
     "sqlitecpp 3.2.1")
 

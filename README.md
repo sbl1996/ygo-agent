@@ -127,7 +127,7 @@ python -u battle.py --deck ../assets/deck --xla_device cpu --checkpoint1 checkpo
 ```
 
 
-## Training (Deprecated, to be updated)
+## Training
 
 Training an agent requires a lot of computational resources, typically 8x4090 GPUs and 128-core CPU for a few days. We don't recommend training the agent on your local machine. Reducing the number of decks for training may reduce the computational resources required.
 
@@ -136,9 +136,12 @@ Training an agent requires a lot of computational resources, typically 8x4090 GP
 We can train the agent with a single GPU using the following command:
 
 ```bash
-python -u ppo.py --deck ../assets/deck --seed 1 --embedding_file embed.pkl \
---minibatch-size 128 --learning-rate 1e-4 --update-epochs 2  --save_interval 100 \
---compile reduce-overhead --env_threads 16 --num_envs 64 --eval_episodes 32
+cd scripts
+python -u cleanba.py --actor-device-ids 0 --learner-device-ids 0 \
+--local-num_envs 16 --num-minibatches 8 --learning-rate 1e-4 \
+--update-epochs 1 --vloss_clip 1.0 --sep_value --value gae \
+--save_interval 100 --seed 0 --m1.film --m1.noam --m1.version 2 \
+--local_eval_episodes 32 --eval_interval 50
 ```
 
 #### Deck
@@ -151,43 +154,16 @@ To handle the diverse and complex card effects, we have converted the card infor
 
 We provide one in the [releases](https://github.com/sbl1996/ygo-agent/releases/tag/v0.1), which named `embed{n}.pkl` where `n` is the number of cards in `code_list.txt`.
 
-You can choose to not use the embeddings by skip the `--embedding_file` option. If you do it, remember to set `--num_embeddings` to `999` in the `eval.py` script.
-
-#### Compile
-We use `torch.compile` to speed up the overall training process. It is very important and can reduce the overall time by 2x or more. If the compilation fails, you may update the PyTorch version to the latest one.
+You can choose to not use the embeddings by skip the `--embedding_file` option.
 
 #### Seed
-The `seed` option is used to set the random seed for reproducibility. However, many optimizations used in the training are not deterministic, so the results may still vary.
-
-For debugging, you can set `--compile None --torch-deterministic` with the same seed to get a deterministic result.
+The `seed` option is used to set the random seed for reproducibility. The training and and evaluation will be exactly the same under the same seed.
 
 #### Hyperparameters
-More PPO hyperparameters can be found in the `ppo.py` script. Tuning them may improve the performance but requires more computational resources.
-
+More hyperparameters can be found in the `cleanba.py` script. Tuning them may improve the performance but requires more computational resources.
 
 ### Distributed Training
-
-The `ppo.py` script supports single-node and multi-node distributed training with `torchrun`. Start distributed training like this:
-
-```bash
-# single node
-OMP_NUM_THREADS=4 torchrun --standalone --nnodes=1 --nproc-per-node=8 ppo.py \
-
-# multi node on nodes 0
-OMP_NUM_THREADS=4 torchrun --nnodes=2 --nproc-per-node=8 --node-rank=0 \
---rdzv-id=12941 --master-addr=$MASTER_ADDR --master-port=$MASTER_PORT ppo.py \
-# multi node on nodes 1
-OMP_NUM_THREADS=4 torchrun --nnodes=2 --nproc-per-node=8 --node-rank=1 \
---rdzv-id=12941 --master-addr=$MASTER_ADDR --master-port=$MASTER_PORT ppo.py \
-
-
-# script options
---deck ../assets/deck --seed 1 --embedding_file embed.pkl \
---minibatch-size 2048 --learning-rate 5e-4 --update-epochs 2 --save_interval 100 \
---compile reduce-overhead --env_threads 128 --num_envs 1024 --eval_episodes 128
-```
-
-The script options are mostly the same as the single GPU training. We only scale the batch size and the number of environments to the number of available CPUs and GPUs. The learning rate is then scaled according to the batch size.
+TODO
 
 ## Plan
 

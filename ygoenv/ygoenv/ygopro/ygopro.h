@@ -2077,6 +2077,7 @@ public:
       if (c[0] == idx) {
         c.erase(c.begin());
         if (c.empty()) {
+          // TODO: maybe finish too early
           _callback_multi_select_2_finish();
           return;
         } else {

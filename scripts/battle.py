@@ -17,7 +17,7 @@ import jax.numpy as jnp
 import flax
 
 from ygoai.utils import init_ygopro
-from ygoai.rl.utils import RecordEpisodeStatistics
+from ygoai.rl.utils import RecordEpisodeStatistics, EnvPreprocess
 from ygoai.rl.jax.agent import RNNAgent, ModelArgs
 
 
@@ -46,6 +46,8 @@ class Args:
     """the number of history actions to use for the environment1"""
     n_history_actions2: Optional[int] = None
     """the number of history actions to use for the environment2, defaults to `n_history_actions1`"""
+    oppo_info: bool = False
+    """whether to use opponent information"""
     num_embeddings: Optional[int] = None
     """the number of embeddings of the agent"""
     accurate: bool = True
@@ -160,8 +162,11 @@ if __name__ == "__main__":
         n_history_actions=args.n_history_actions1,
         deck1=args.deck1,
         deck2=args.deck2,
+        oppo_info=args.oppo_info,
         **env_option,
     )
+    envs1 = EnvPreprocess(envs1, skip_mask=not args.oppo_info)
+
     if cross_env:
         envs2 = ygoenv.make(
             task_id=env_id2,

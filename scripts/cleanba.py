@@ -63,8 +63,6 @@ class Args:
     """the name of the tensorboard run"""
     ckpt_dir: str = "checkpoints"
     """the directory to save the model checkpoints"""
-    gcs_bucket: Optional[str] = None
-    """the GCS bucket to save the model checkpoints"""
 
     # Algorithm specific arguments
     env_id: str = "YGOPro-v1"
@@ -218,7 +216,7 @@ def make_env(args, seed, num_envs, num_threads, mode='self', thread_affinity_off
         greedy_reward=args.greedy_reward if not eval else True,
         play_mode=mode,
         timeout=args.timeout,
-        oppo_info=args.m2.oppo_info if eval else args.m1.oppo_info,
+        oppo_info=False,
     )
     envs.num_envs = num_envs
     return envs
@@ -260,13 +258,6 @@ def get_variables(agent_state):
     if batch_stats is not None:
         variables['batch_stats'] = batch_stats
     return variables
-
-
-def init_rnn_state(num_envs, rnn_channels):
-    return (
-        np.zeros((num_envs, rnn_channels)),
-        np.zeros((num_envs, rnn_channels)),
-    )
 
 
 def reshape_minibatch(
@@ -357,7 +348,7 @@ def rollout(
         args.local_env_threads,
         thread_affinity_offset=device_thread_id * args.local_env_threads,
     )
-    envs = EnvPreprocess(envs, skip_mask=not args.m1.oppo_info)
+    envs = EnvPreprocess(envs, skip_mask=True)
     envs = RecordEpisodeStatistics(envs)
 
     eval_envs = make_env(
@@ -378,17 +369,19 @@ def rollout(
     avg_win_rates = deque(maxlen=1000)
 
     agent = create_agent(args)
+    apply_fn = agent.apply
     eval_agent = create_agent(args, eval=eval_mode != 'bot')
+    eval_apply_fn = eval_agent.apply
 
     @jax.jit
     def get_action(params, obs, rstate):
-        rstate, logits = eval_agent.apply(params, obs, rstate)[:2]
+        rstate, logits = eval_apply_fn(params, obs, rstate)[:2]
         return rstate, logits.argmax(axis=1)
 
     @jax.jit
     def get_action_battle(params1, params2, obs, rstate1, rstate2, main, done):
-        next_rstate1, logits1 = agent.apply(params1, obs, rstate1)[:2]
-        next_rstate2, logits2 = eval_agent.apply(params2, obs, rstate2)[:2]
+        next_rstate1, logits1 = apply_fn(params1, obs, rstate1)[:2]
+        next_rstate2, logits2 = eval_apply_fn(params2, obs, rstate2)[:2]
         logits = jnp.where(main[:, None], logits1, logits2)
         rstate1 = jax.tree.map(
             lambda x1, x2: jnp.where(main[:, None], x1, x2), next_rstate1, rstate1)
@@ -401,7 +394,7 @@ def rollout(
     @jax.jit
     def sample_action(
         params, next_obs, rstate1, rstate2, main, done, key):
-        (rstate1, rstate2), logits, value = agent.apply(
+        (rstate1, rstate2), logits, value = apply_fn(
             params, next_obs, (rstate1, rstate2), done, main)[:3]
         value = jnp.squeeze(value, axis=-1)
         action, key = categorical_sample(logits, key)
@@ -608,6 +601,7 @@ def rollout(
         if update % args.log_frequency == 0:
             avg_episodic_return = np.mean(avg_ep_returns)
             avg_episodic_length = np.mean(envs.returned_episode_lengths)
+            max_episode_length = np.max(envs.returned_episode_lengths)
             SPS = int((global_step - warmup_step) / (time.time() - start_time - other_time))
             SPS_update = int(args.batch_size / (time.time() - update_time_start))
 
@@ -625,6 +619,7 @@ def rollout(
             writer.add_scalar("stats/rollout_time", np.mean(rollout_time), tb_global_step)
             writer.add_scalar("charts/avg_episodic_return", avg_episodic_return, tb_global_step)
             writer.add_scalar("charts/avg_episodic_length", avg_episodic_length, tb_global_step)
+            writer.add_scalar("charts/max_episode_length", max_episode_length, tb_global_step)
             writer.add_scalar("stats/params_queue_get_time", np.mean(params_queue_get_time), tb_global_step)
             writer.add_scalar("stats/inference_time", inference_time, tb_global_step)
             writer.add_scalar("stats/env_time", env_time, tb_global_step)
@@ -780,9 +775,7 @@ def main():
     tx = optax.apply_if_finite(tx, max_consecutive_errors=10)
 
     if 'batch_stats' not in variables:
-        # variables = flax.core.unfreeze(variables)
         variables['batch_stats'] = {}
-        # variables = flax.core.freeze(variables)
     agent_state = TrainState.create(
         apply_fn=None,
         params=variables['params'],
@@ -1046,7 +1039,7 @@ def main():
                         (loss, pg_loss, v_loss, ent_loss, approx_kl) = jax.lax.scan(
                         update_minibatch_t, (carry, init_rstate), minibatch_t)
                     return carry, (loss, pg_loss, v_loss, ent_loss, approx_kl)
-      
+
             agent_state, (loss, pg_loss, v_loss, ent_loss, approx_kl) = jax.lax.scan(
                 update_minibatch,
                 agent_state,
