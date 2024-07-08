@@ -3,11 +3,13 @@ SCRIPTS_DIR := "../ygopro-scripts"
 DATABASE_REPO := "https://github.com/mycard/ygopro-database/raw/f288cd7d353467eb3816babcbb04620e11f64e8a/locales"
 LOCALES := en zh
 
-.PHONY: all assets script py_install ygoenv_so
+.PHONY: all assets script py_install ygoenv_so clean dev
 
 all: assets script py_install
 
-py_install: ygoenv_so
+dev: assets script py_install ygoenv_so
+
+py_install:
 	pip install -e ygoenv
 	pip install -e .
 
@@ -41,3 +43,9 @@ assets/locale/zh/cards.cdb: assets/locale/zh
 
 assets/locale/zh/strings.conf: assets/locale/zh
 	wget -nv $(DATABASE_REPO)/zh-CN/strings.conf -O $@
+
+clean:
+	rm -rf scripts/script
+	rm -rf assets/locale/en assets/locale/zh
+	pip uninstall -y ygoenv
+	pip uninstall -y .
