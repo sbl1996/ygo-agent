@@ -70,7 +70,7 @@ After building, you can run the following command to test the environment. If yo
 
 ```bash
 cd scripts
-python -u eval.py --env-id "YGOPro-v0" --deck ../assets/deck/  --num_episodes 32 --strategy random  --lang chinese --num_envs 16
+python -u eval.py --env-id "YGOPro-v1" --deck ../assets/deck/  --num_episodes 32 --strategy random  --lang chinese --num_envs 16
 ```
 
 ### Common Issues
