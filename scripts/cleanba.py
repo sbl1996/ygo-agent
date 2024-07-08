@@ -1190,13 +1190,6 @@ def main():
             M_steps = tb_global_step // 2**20
             ckpt_name = f"{timestamp}_{M_steps}M.flax_model"
             ckpt_maneger.save(unreplicated_params, ckpt_name)
-            if args.gcs_bucket is not None:
-                lastest_path = ckpt_maneger.get_latest()
-                copy_path = lastest_path.with_name("latest" + lastest_path.suffix)
-                shutil.copyfile(lastest_path, copy_path)
-                zip_file_path = "latest.zip"
-                zip_files(zip_file_path, [str(copy_path), tb_log_dir])
-                sync_to_gcs(args.gcs_bucket, zip_file_path)
 
         if learner_policy_version >= args.num_updates:
             break
