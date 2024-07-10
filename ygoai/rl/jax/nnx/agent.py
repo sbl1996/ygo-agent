@@ -646,11 +646,11 @@ class EncoderArgs:
     """whether to use history actions as input for agent"""
     card_mask: bool = False
     """whether to mask the padding card as ignored in the transformer"""
-    noam: bool = False
+    noam: bool = True
     """whether to use Noam architecture for the transformer layer"""
     action_feats: bool = True
     """whether to use action features for the global state"""
-    version: int = 0
+    version: int = 2
     """the version of the environment and the agent"""
 
 
@@ -660,7 +660,7 @@ class ModelArgs(EncoderArgs):
     """the number of channels for the RNN in the agent"""
     rnn_type: Optional[Literal['lstm', 'gru', 'rwkv', 'none']] = "lstm"
     """the type of RNN to use, None for no RNN"""
-    film: bool = False
+    film: bool = True
     """whether to use FiLM for the actor"""
     rnn_shortcut: bool = False
     """whether to use shortcut for the RNN"""
@@ -684,15 +684,15 @@ class RNNAgent(nnx.Module):
         use_history: bool = True,
         card_mask: bool = False,
         rnn_type: str = 'lstm',
-        film: bool = False,
-        noam: bool = False,
+        film: bool = True,
+        noam: bool = True,
         rwkv_head_size: int = 32,
         action_feats: bool = True,
         rnn_shortcut: bool = False,
         batch_norm: bool = False,
         critic_width: int = 128,
         critic_depth: int = 3,
-        version: int = 0,
+        version: int = 2,
         q_head: bool = False,
         switch: bool = True,
         freeze_id: bool = False,

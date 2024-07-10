@@ -96,7 +96,7 @@ if __name__ == "__main__":
 
     seed = args.seed + 100000
     random.seed(seed)
-    seed = random.randint(0, 1e8)
+    seed = random.randint(0, int(1e8))
     random.seed(seed)
     np.random.seed(seed)
 

@@ -743,14 +743,14 @@ def main():
 
     # seeding
     random.seed(args.seed)
-    seed = random.randint(0, 1e8)
+    seed = random.randint(0, int(1e8))
 
     seed_offset = args.local_rank
     seed += seed_offset
     init_key = jax.random.PRNGKey(seed - seed_offset)
 
     random.seed(seed)
-    args.real_seed = random.randint(0, 1e8)
+    args.real_seed = random.randint(0, int(1e8))
 
     key = jax.random.PRNGKey(args.real_seed)
     key, *learner_keys = jax.random.split(key, len(learner_devices) + 1)

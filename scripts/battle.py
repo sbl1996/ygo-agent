@@ -131,7 +131,7 @@ if __name__ == "__main__":
 
     seed = args.seed + 100000
     random.seed(seed)
-    seed = random.randint(0, 1e8)
+    seed = random.randint(0, int(1e8))
     random.seed(seed)
     np.random.seed(seed)
 
@@ -165,6 +165,7 @@ if __name__ == "__main__":
         oppo_info=args.oppo_info,
         **env_option,
     )
+    envs1.num_envs = num_envs
     envs1 = EnvPreprocess(envs1, skip_mask=not args.oppo_info)
 
     if cross_env:
@@ -175,11 +176,11 @@ if __name__ == "__main__":
             deck2=deck2,
             **env_option,
         )
+        envs2.num_envs = num_envs
 
     key = jax.random.PRNGKey(seed)
 
     obs_space1 = envs1.observation_space
-    envs1.num_envs = num_envs
     envs1 = RecordEpisodeStatistics(envs1)
     sample_obs1 = jax.tree.map(lambda x: jnp.array([x]), obs_space1.sample())
     agent1 = create_agent1(args)
@@ -190,7 +191,6 @@ if __name__ == "__main__":
 
     if cross_env:
         obs_space2 = envs2.observation_space
-        envs2.num_envs = num_envs
         envs2 = RecordEpisodeStatistics(envs2)
         sample_obs2 = jax.tree.map(lambda x: jnp.array([x]), obs_space2.sample())
     else:

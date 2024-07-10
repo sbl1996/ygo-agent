@@ -83,11 +83,10 @@ class CardEncoder(nn.Module):
     dtype: Optional[jnp.dtype] = None
     param_dtype: jnp.dtype = jnp.float32
     oppo_info: bool = False
-    version: int = 0
+    version: int = 2
 
     @nn.compact
     def __call__(self, x_id, x, mask):
-        assert self.version > 0
         c = self.channels
         mlp = partial(MLP, dtype=self.dtype, param_dtype=self.param_dtype)
         layer_norm = partial(nn.LayerNorm, use_scale=True, use_bias=True, dtype=self.dtype)
@@ -104,13 +103,6 @@ class CardEncoder(nn.Module):
 
         x_loc = x1[:, :, 0]
         x_seq = x1[:, :, 1]
-
-        if self.version == 0:
-            x_id = mlp(
-                (c, c // 4), kernel_init=default_fc_init2)(x_id)
-            x_id = layer_norm()(x_id)
-            f_loc = layer_norm()(embed(9, c)(x_loc))
-            f_seq = layer_norm()(embed(76, c)(x_seq))
 
         c_mask = x_loc == 0
         c_mask = c_mask.at[:, 0].set(False)
@@ -130,44 +122,34 @@ class CardEncoder(nn.Module):
         x_def = fc_embed(c // 16, kernel_init=default_fc_init1)(x_def)
         x_type = fc_embed(c // 16 * 2, kernel_init=default_fc_init2)(x2[:, :, 4:])
 
-        if self.version == 0:
-            x_f = jnp.concatenate([
-                x_owner, x_position, x_overley, x_attribute,
-                x_race, x_level, x_counter, x_negated,
-                x_atk, x_def, x_type], axis=-1)
-            x_f = layer_norm()(x_f)            
-            f_cards = jnp.concatenate([x_id, x_f], axis=-1)
-            f_cards = f_cards + f_loc + f_seq
-            f_cards_g = None
+        x_id = mlp((c,), kernel_init=default_fc_init2)(x_id)
+        x_id = jax.nn.swish(x_id)
+        f_loc = embed(9, c // 16 * 2)(x_loc)
+        f_seq = embed(76, c // 16 * 2)(x_seq)
+        feats_g = [
+            x_id, f_loc, f_seq, x_owner, x_position, x_overley, x_attribute,
+            x_race, x_level, x_counter, x_negated, x_atk, x_def, x_type]
+        if mask is not None:
+            assert len(feats_g) == mask.shape[-1]
+            feats = [
+                jnp.where(mask[..., i:i+1] == 1, f, f[..., -1:, :])
+                for i, f in enumerate(feats_g)
+            ]
         else:
-            x_id = mlp((c,), kernel_init=default_fc_init2)(x_id)
-            x_id = jax.nn.swish(x_id)
-            f_loc = embed(9, c // 16 * 2)(x_loc)
-            f_seq = embed(76, c // 16 * 2)(x_seq)
-            feats_g = [
-                x_id, f_loc, f_seq, x_owner, x_position, x_overley, x_attribute,
-                x_race, x_level, x_counter, x_negated, x_atk, x_def, x_type]
-            if mask is not None:
-                assert len(feats_g) == mask.shape[-1]
-                feats = [
-                    jnp.where(mask[..., i:i+1] == 1, f, f[..., -1:, :])
-                    for i, f in enumerate(feats_g)
-                ]
-            else:
-                feats = feats_g
-            x_cards = jnp.concatenate(feats[1:], axis=-1)
-            x_cards = mlp((c,), kernel_init=default_fc_init2)(x_cards)
-            x_cards = x_cards * feats[0]
-            f_cards = layer_norm()(x_cards)
-            # f_cards = f_cards.astype(self.dtype)
-            if self.oppo_info:
-                x_cards_g = jnp.concatenate(feats_g[1:], axis=-1)
-                x_cards_g = mlp((c,), kernel_init=default_fc_init2)(x_cards_g)
-                x_cards_g = x_cards_g * feats_g[0]
-                f_cards_g = layer_norm()(x_cards_g)
-                # f_cards_g = f_cards_g.astype(self.dtype)
-            else:
-                f_cards_g = None
+            feats = feats_g
+        x_cards = jnp.concatenate(feats[1:], axis=-1)
+        x_cards = mlp((c,), kernel_init=default_fc_init2)(x_cards)
+        x_cards = x_cards * feats[0]
+        f_cards = layer_norm()(x_cards)
+        # f_cards = f_cards.astype(self.dtype)
+        if self.oppo_info:
+            x_cards_g = jnp.concatenate(feats_g[1:], axis=-1)
+            x_cards_g = mlp((c,), kernel_init=default_fc_init2)(x_cards_g)
+            x_cards_g = x_cards_g * feats_g[0]
+            f_cards_g = layer_norm()(x_cards_g)
+            # f_cards_g = f_cards_g.astype(self.dtype)
+        else:
+            f_cards_g = None
         return f_cards_g, f_cards, c_mask
 
 
@@ -175,7 +157,7 @@ class GlobalEncoder(nn.Module):
     channels: int = 128
     dtype: Optional[jnp.dtype] = None
     param_dtype: jnp.dtype = jnp.float32
-    version: int = 0
+    version: int = 2
 
     @nn.compact
     def __call__(self, x):
@@ -230,7 +212,7 @@ class Encoder(nn.Module):
     noam: bool = False
     action_feats: bool = True
     oppo_info: bool = False
-    version: int = 0
+    version: int = 2
 
     @nn.compact
     def __call__(self, x):
@@ -252,7 +234,7 @@ class Encoder(nn.Module):
         card_encoder = CardEncoder(
             channels=c, dtype=self.dtype, param_dtype=self.param_dtype,
             version=self.version, oppo_info=self.oppo_info)
-        ActionEncoderCls = ActionEncoder if self.version == 0 else ActionEncoderV1
+        ActionEncoderCls = ActionEncoderV1
         action_encoder = ActionEncoderCls(
             channels=c, dtype=self.dtype, param_dtype=self.param_dtype)
         
@@ -313,60 +295,33 @@ class Encoder(nn.Module):
 
         # History actions
         x_h_actions = x_h_actions.astype(jnp.int32)
-        if self.version == 0:
-            h_mask = x_h_actions[:, :, 2] == 0  # msg == 0
-            h_mask = h_mask.at[:, 0].set(False)
+        h_mask = x_h_actions[:, :, 3] == 0  # msg == 0
+        h_mask = h_mask.at[:, 0].set(False)
 
-            x_h_id = decode_id(x_h_actions[..., :2])
-            x_h_id = id_embed(x_h_id)
-            if self.freeze_id:
-                x_h_id = jax.lax.stop_gradient(x_h_id)
-            x_h_id = MLP(
-                (c, c), dtype=self.dtype, param_dtype=self.param_dtype,
-                kernel_init=default_fc_init2)(x_h_id)
+        x_h_id = decode_id(x_h_actions[..., 1:3])
+        x_h_id = id_embed(x_h_id)
+        if self.freeze_id:
+            x_h_id = jax.lax.stop_gradient(x_h_id)
 
-            x_h_a_feats1 = action_encoder(x_h_actions[:, :, 2:13])
+        x_h_id = fc_layer(c)(x_h_id)
 
-            x_h_a_player = embed(2, c // 2)(x_h_actions[:, :, 13])
-            x_h_a_turn = embed(20, c // 2)(x_h_actions[:, :, 14])
-            x_h_a_feats = jnp.concatenate([
-                *x_h_a_feats1, x_h_a_player, x_h_a_turn], axis=-1)
+        x_h_a_feats = action_encoder(x_h_actions[:, :, 3:12])
+        x_h_a_turn = embed(20, c // 2)(x_h_actions[:, :, 12])
+        x_h_a_phase = embed(12, c // 2)(x_h_actions[:, :, 13])
+        x_h_a_feats.extend([x_h_id, x_h_a_turn, x_h_a_phase])
+        x_h_a_feats = jnp.concatenate(x_h_a_feats, axis=-1)
+        x_h_a_feats = layer_norm()(x_h_a_feats)
+        x_h_a_feats = fc_layer(c)(x_h_a_feats)
 
-            f_h_actions = layer_norm()(x_h_id) + layer_norm()(fc_layer(c)(x_h_a_feats))
-
-            f_h_actions = PositionalEncoding()(f_h_actions)
-            for _ in range(self.num_layers):
-                f_h_actions = EncoderLayer(num_heads, dtype=self.dtype, param_dtype=self.param_dtype)(
-                    f_h_actions, src_key_padding_mask=h_mask)
-            f_g_h_actions = layer_norm()(f_h_actions[:, 0])
+        if self.noam:
+            f_h_actions = LlamaEncoderLayer(
+                num_heads, dtype=self.dtype, param_dtype=self.param_dtype,
+                rope=True, n_positions=64)(x_h_a_feats, src_key_padding_mask=h_mask)
         else:
-            h_mask = x_h_actions[:, :, 3] == 0  # msg == 0
-            h_mask = h_mask.at[:, 0].set(False)
-
-            x_h_id = decode_id(x_h_actions[..., 1:3])
-            x_h_id = id_embed(x_h_id)
-            if self.freeze_id:
-                x_h_id = jax.lax.stop_gradient(x_h_id)
-
-            x_h_id = fc_layer(c)(x_h_id)
-
-            x_h_a_feats = action_encoder(x_h_actions[:, :, 3:12])
-            x_h_a_turn = embed(20, c // 2)(x_h_actions[:, :, 12])
-            x_h_a_phase = embed(12, c // 2)(x_h_actions[:, :, 13])
-            x_h_a_feats.extend([x_h_id, x_h_a_turn, x_h_a_phase])
-            x_h_a_feats = jnp.concatenate(x_h_a_feats, axis=-1)
-            x_h_a_feats = layer_norm()(x_h_a_feats)
-            x_h_a_feats = fc_layer(c)(x_h_a_feats)
-
-            if self.noam:
-                f_h_actions = LlamaEncoderLayer(
-                    num_heads, dtype=self.dtype, param_dtype=self.param_dtype,
-                    rope=True, n_positions=64)(x_h_a_feats, src_key_padding_mask=h_mask)
-            else:
-                x_h_a_feats = PositionalEncoding()(x_h_a_feats)
-                f_h_actions = EncoderLayer(num_heads, dtype=self.dtype, param_dtype=self.param_dtype)(
-                    x_h_a_feats, src_key_padding_mask=h_mask)
-            f_g_h_actions = layer_norm()(f_h_actions[:, 0])
+            x_h_a_feats = PositionalEncoding()(x_h_a_feats)
+            f_h_actions = EncoderLayer(num_heads, dtype=self.dtype, param_dtype=self.param_dtype)(
+                x_h_a_feats, src_key_padding_mask=h_mask)
+        f_g_h_actions = layer_norm()(f_h_actions[:, 0])
 
 
         # Actions
@@ -379,63 +334,42 @@ class Encoder(nn.Module):
         f_na_card = jnp.tile(na_card_embed, (batch_size, 1, 1)).astype(f_cards.dtype)
         f_cards = jnp.concatenate([f_na_card, f_cards[:, 1:]], axis=1)
 
-        if self.version == 0:
-            spec_index = decode_id(x_actions[..., :2])
-            B = jnp.arange(batch_size)
-            f_a_cards = f_cards[B[:, None], spec_index]
-            f_a_cards = fc_layer(c)(f_a_cards)
+        spec_index = x_actions[..., 0]
+        B = jnp.arange(batch_size)
+        f_a_cards = f_cards[B[:, None], spec_index]
 
-            x_a_feats = jnp.concatenate(action_encoder(x_actions[..., 2:]), axis=-1)
-            x_a_feats = fc_layer(c)(x_a_feats)
-            f_actions = jnp.concatenate([f_a_cards, x_a_feats], axis=-1)
-            f_actions = fc_layer(c)(nn.leaky_relu(f_actions, negative_slope=0.1))
-            f_actions = layer_norm(dtype=self.dtype)(f_actions)
+        x_a_id = decode_id(x_actions[..., 1:3])
+        x_a_id = id_embed(x_a_id)
+        if self.freeze_id:
+            x_a_id = jax.lax.stop_gradient(x_a_id)
+        x_a_id = fc_layer(c)(x_a_id)
 
-            a_mask = x_actions[:, :, 2] == 0
-            a_mask = a_mask.at[:, 0].set(False)
+        x_a_feats = action_encoder(x_actions[..., 3:])
+        x_a_feats.append(x_a_id)
+        x_a_feats = jnp.concatenate(x_a_feats, axis=-1)
+        x_a_feats = layer_norm()(x_a_feats)
+        x_a_feats = fc_layer(c)(x_a_feats)
+        f_a_cards = fc_layer(c)(f_a_cards)
+        f_actions = jax.nn.silu(f_a_cards) * x_a_feats
+        f_actions = fc_layer(c)(f_actions)
+        f_actions = x_a_feats + f_actions
 
+        a_mask = x_actions[:, :, 3] == 0
+        a_mask = a_mask.at[:, 0].set(False)
+
+        g_feats = [f_g_card, f_global]
+        if self.use_history:
+            g_feats.append(f_g_h_actions)
+
+        if self.action_feats:
+            f_actions_g = fc_layer(c)(f_actions)
             a_mask_ = (1 - a_mask.astype(f_actions.dtype))
-            f_g_actions = (f_actions * a_mask_[:, :, None]).sum(axis=1)
+            f_g_actions = (f_actions_g * a_mask_[:, :, None]).sum(axis=1)
             f_g_actions = f_g_actions / a_mask_.sum(axis=1, keepdims=True)
-            if not self.use_history:
-                f_g_h_actions = jnp.zeros_like(f_g_h_actions)
-            f_state = jnp.concatenate([f_g_card, f_global, f_g_h_actions, f_g_actions], axis=-1)
-        else:
-            spec_index = x_actions[..., 0]
-            B = jnp.arange(batch_size)
-            f_a_cards = f_cards[B[:, None], spec_index]
+            g_feats.append(f_g_actions)
 
-            x_a_id = decode_id(x_actions[..., 1:3])
-            x_a_id = id_embed(x_a_id)
-            if self.freeze_id:
-                x_a_id = jax.lax.stop_gradient(x_a_id)
-            x_a_id = fc_layer(c)(x_a_id)
+        f_state = jnp.concatenate(g_feats, axis=-1)
 
-            x_a_feats = action_encoder(x_actions[..., 3:])
-            x_a_feats.append(x_a_id)
-            x_a_feats = jnp.concatenate(x_a_feats, axis=-1)
-            x_a_feats = layer_norm()(x_a_feats)
-            x_a_feats = fc_layer(c)(x_a_feats)
-            f_a_cards = fc_layer(c)(f_a_cards)
-            f_actions = jax.nn.silu(f_a_cards) * x_a_feats
-            f_actions = fc_layer(c)(f_actions)
-            f_actions = x_a_feats + f_actions
-
-            a_mask = x_actions[:, :, 3] == 0
-            a_mask = a_mask.at[:, 0].set(False)
-
-            g_feats = [f_g_card, f_global]
-            if self.use_history:
-                g_feats.append(f_g_h_actions)
-
-            if self.action_feats:
-                f_actions_g = fc_layer(c)(f_actions)
-                a_mask_ = (1 - a_mask.astype(f_actions.dtype))
-                f_g_actions = (f_actions_g * a_mask_[:, :, None]).sum(axis=1)
-                f_g_actions = f_g_actions / a_mask_.sum(axis=1, keepdims=True)
-                g_feats.append(f_g_actions)
-
-            f_state = jnp.concatenate(g_feats, axis=-1)
         oc = self.out_channels or c
         if self.version == 2:
             f_state = GLUMlp(
@@ -573,7 +507,7 @@ def rnn_step_by_main(rnn_layer, rstate, f_state, done, main, return_state=False)
         return rstate, f_state
 
 
-def rnn_forward_2p(rnn_layer, rstate, f_state, done, switch_or_main, switch=True, return_state=False):
+def rnn_forward_2p(rnn_layer, rstate, f_state, done, switch_or_main, switch=False, return_state=False):
     if switch:
         def body_fn(cell, carry, x, done, switch):
             rstate, init_rstate2 = carry
@@ -601,11 +535,11 @@ class EncoderArgs:
     """whether to use history actions as input for agent"""
     card_mask: bool = False
     """whether to mask the padding card as ignored in the transformer"""
-    noam: bool = False
+    noam: bool = True
     """whether to use Noam architecture for the transformer layer"""
     action_feats: bool = True
     """whether to use action features for the global state"""
-    version: int = 0
+    version: int = 2
     """the version of the environment and the agent"""
 
 
@@ -615,7 +549,7 @@ class ModelArgs(EncoderArgs):
     """the number of channels for the RNN in the agent"""
     rnn_type: Optional[Literal['lstm', 'gru', 'rwkv', 'none']] = "lstm"
     """the type of RNN to use, None for no RNN"""
-    film: bool = False
+    film: bool = True
     """whether to use FiLM for the actor"""
     oppo_info: bool = False
     """whether to use opponent's information"""
@@ -638,8 +572,8 @@ class RNNAgent(nn.Module):
     use_history: bool = True
     card_mask: bool = False
     rnn_type: str = 'lstm'
-    film: bool = False
-    noam: bool = False
+    film: bool = True
+    noam: bool = True
     rwkv_head_size: int = 32
     action_feats: bool = True
     oppo_info: bool = False
@@ -647,10 +581,10 @@ class RNNAgent(nn.Module):
     batch_norm: bool = False
     critic_width: int = 128
     critic_depth: int = 3
-    version: int = 0
+    version: int = 2
 
     q_head: bool = False
-    switch: bool = True
+    switch: bool = False
     freeze_id: bool = False
     int_head: bool = False
     embedding_shape: Optional[Union[int, Tuple[int, int]]] = None

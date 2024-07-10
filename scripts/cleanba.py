@@ -106,7 +106,7 @@ class Args:
     """the discount factor gamma"""
     num_minibatches: int = 64
     """the number of mini-batches"""
-    update_epochs: int = 2
+    update_epochs: int = 1
     """the K epochs to update the policy"""
     switch: bool = False
     """Toggle the use of switch mechanism"""
@@ -119,7 +119,7 @@ class Args:
     """Toggle the use of UPGO for advantages"""
     sep_value: bool = True
     """Whether separate value function computation for each player"""
-    value: Literal["vtrace", "gae"] = "vtrace"
+    value: Literal["vtrace", "gae"] = "gae"
     """the method to learn the value function"""
     gae_lambda: float = 0.95
     """the lambda for the general advantage estimation"""
@@ -715,14 +715,14 @@ def main():
 
     # seeding
     random.seed(args.seed)
-    seed = random.randint(0, 1e8)
+    seed = random.randint(0, int(1e8))
 
     seed_offset = args.local_rank
     seed += seed_offset
     init_key = jax.random.PRNGKey(seed - seed_offset)
 
     random.seed(seed)
-    args.real_seed = random.randint(0, 1e8)
+    args.real_seed = random.randint(0, int(1e8))
 
     key = jax.random.PRNGKey(args.real_seed)
     key, *learner_keys = jax.random.split(key, len(learner_devices) + 1)
