@@ -70,7 +70,7 @@ Pre-built binaries are available for Ubuntu 22.04 or newer. If you're using them
 3. Verify the installation:
    ```bash
    cd scripts
-   python -u eval.py --env-id "YGOPro-v1" --deck ../assets/deck/  --num_episodes 32 --strategy random  --lang chinese --num_envs 16
+   python -u eval.py --deck ../assets/deck/  --num_episodes 32 --strategy random  --lang chinese --num_envs 16
    ```
    If you see episode logs and the output contains this line, the environment is working correctly. For more usage examples, see the [Evaluation](#evaluation) section.
 

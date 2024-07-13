@@ -16,6 +16,10 @@ REQUIRED = [
   "tyro",
   "pandas",
   "tensorboardX",
+  "fastapi",
+  "uvicorn[standard]",
+  "pydantic_settings",
+  "tqdm",
 ]
 
 here = os.path.dirname(os.path.abspath(__file__))
