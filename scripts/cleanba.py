@@ -20,7 +20,6 @@ import optax
 import distrax
 import tyro
 from rich.pretty import pprint
-from tensorboardX import SummaryWriter
 
 from ygoai.utils import init_ygopro, load_embeddings
 from ygoai.rl.utils import RecordEpisodeStatistics, EnvPreprocess
@@ -55,7 +54,7 @@ class Args:
     debug: bool = False
     """whether to run the script in debug mode"""
 
-    tb_dir: str = "runs"
+    tb_dir: Optional[str] = "runs"
     """the directory to save the tensorboard logs"""
     tb_offset: int = 0
     """the step offset of the tensorboard logs"""
@@ -696,8 +695,9 @@ def main():
     dummy_writer = SimpleNamespace()
     dummy_writer.add_scalar = lambda x, y, z: None
 
-    tb_log_dir = f"{args.tb_dir}/{run_name}"
-    if args.local_rank == 0 and not args.debug:
+    if args.local_rank == 0 and not args.debug and args.tb_dir is not None:
+        from tensorboardX import SummaryWriter
+        tb_log_dir = f"{args.tb_dir}/{run_name}"
         writer = SummaryWriter(tb_log_dir)
         writer.add_text(
             "hyperparameters",

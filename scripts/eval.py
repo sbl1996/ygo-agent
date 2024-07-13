@@ -210,17 +210,6 @@ if __name__ == "__main__":
         for idx, d in enumerate(dones):
             if not d:
                 continue
-            # for i in range(2):
-            #     deck_time = infos['step_time'][idx][i]
-            #     deck_name = deck_names[infos['deck'][idx][i]]
-
-            #     time_count = deck_time_count[deck_name]
-            #     avg_time = deck_times[deck_name]
-            #     avg_time = avg_time * (time_count / (time_count + 1)) + deck_time / (time_count + 1)
-            #     deck_times[deck_name] = avg_time
-            #     deck_time_count[deck_name] += 1
-            #     if deck_time_count[deck_name] % 100 == 0:
-            #         print(f"Deck {deck_name}: {avg_time:.4f}")
 
             win_reason = infos['win_reason'][idx]
             episode_length = infos['l'][idx]
@@ -235,7 +224,7 @@ if __name__ == "__main__":
         if len(episode_lengths) >= args.num_episodes:
             break
 
-    print(f"len={np.mean(episode_lengths)}, reward={np.mean(episode_rewards)}, win_rate={np.mean(win_rates)}, win_reason={np.mean(win_reasons)}")
+    print(f"len={np.mean(episode_lengths):.4f}, reward={np.mean(episode_rewards):.4f}, win_rate={np.mean(win_rates):.4f}, win_reason={np.mean(win_reasons):.4f}")
     if not args.play:
         total_time = time.time() - start
         total_steps = (step - start_step) * num_envs

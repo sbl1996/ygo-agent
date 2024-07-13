@@ -15,6 +15,7 @@ VERSION = None
 REQUIRED = [
   "tyro",
   "pandas",
+  "tensorboardX",
 ]
 
 here = os.path.dirname(os.path.abspath(__file__))
