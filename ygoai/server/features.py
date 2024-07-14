@@ -1063,7 +1063,6 @@ class PredictState:
     
     def update_history_actions(self, idx: int):
         idx1 = transform_select_idx(self._probs, idx, self._action_msg)
-        print(f"{idx} -> {idx1}")
         action = self._actions[idx1]
         self.history_actions.update(action, self._turn, self._phase)
         self.reset()
