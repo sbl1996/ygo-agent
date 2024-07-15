@@ -242,7 +242,7 @@ class Encoder(nn.Module):
         x_global = x['global_']
         x_actions = x['actions_']
         x_h_actions = x['h_actions_']
-        mask = x['mask_']
+        mask = x.get('mask_', None)
         batch_size = x_global.shape[0]
         
         valid = x_global[:, -1] == 0
@@ -296,7 +296,8 @@ class Encoder(nn.Module):
         # History actions
         x_h_actions = x_h_actions.astype(jnp.int32)
         h_mask = x_h_actions[:, :, 3] == 0  # msg == 0
-        h_mask = h_mask.at[:, 0].set(False)
+        h_mask = jnp.concatenate([jnp.zeros((batch_size, 1), dtype=h_mask.dtype), h_mask[:, 1:]], axis=1)
+        # h_mask = h_mask.at[:, 0].set(False)
 
         x_h_id = decode_id(x_h_actions[..., 1:3])
         x_h_id = id_embed(x_h_id)
@@ -355,7 +356,8 @@ class Encoder(nn.Module):
         f_actions = x_a_feats + f_actions
 
         a_mask = x_actions[:, :, 3] == 0
-        a_mask = a_mask.at[:, 0].set(False)
+        a_mask = jnp.concatenate([jnp.zeros((batch_size, 1), dtype=a_mask.dtype), a_mask[:, 1:]], axis=1)
+        # a_mask = a_mask.at[:, 0].set(False)
 
         g_feats = [f_g_card, f_global]
         if self.use_history:
@@ -698,17 +700,17 @@ class RNNAgent(nn.Module):
     def init_rnn_state(self, batch_size):
         if self.rnn_type in ['lstm', 'none']:
             return (
-                np.zeros((batch_size, self.rnn_channels)),
-                np.zeros((batch_size, self.rnn_channels)),
+                np.zeros((batch_size, self.rnn_channels), dtype=np.float32),
+                np.zeros((batch_size, self.rnn_channels), dtype=np.float32),
             )
         elif self.rnn_type == 'gru':
-            return np.zeros((batch_size, self.rnn_channels))
+            return np.zeros((batch_size, self.rnn_channels), dtype=np.float32)
         elif self.rnn_type == 'rwkv':
             head_size = self.rwkv_head_size
             num_heads = self.rnn_channels // self.rwkv_head_size
             return (
-                np.zeros((batch_size, num_heads*head_size)),
-                np.zeros((batch_size, num_heads*head_size*head_size)),
+                np.zeros((batch_size, num_heads*head_size), dtype=np.float32),
+                np.zeros((batch_size, num_heads*head_size*head_size), dtype=np.float32),
             )
         else:
             return None

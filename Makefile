@@ -11,6 +11,7 @@ dev: assets script py_install ygoenv_so
 
 py_install:
 	pip install -e ygoenv
+	pip install -e ygoinf
 	pip install -e .
 
 ygoenv_so: ygoenv/ygoenv/ygopro/ygopro_ygoenv.so
@@ -47,5 +48,3 @@ assets/locale/zh/strings.conf: assets/locale/zh
 clean:
 	rm -rf scripts/script
 	rm -rf assets/locale/en assets/locale/zh
-	pip uninstall -y ygoenv
-	pip uninstall -y .

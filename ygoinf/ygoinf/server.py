@@ -8,13 +8,9 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Path
 from fastapi.middleware.cors import CORSMiddleware
+from pydantic import Field
 from pydantic_settings import BaseSettings
 
-import numpy as np
-import jax
-import jax.numpy as jnp
-import flax
-from ygoai.rl.jax.agent import RNNAgent
 
 from .models import (
     DuelCreateResponse,
@@ -22,44 +18,20 @@ from .models import (
     DuelPredictResponse,
     DuelPredictErrorResponse,
 )
-from .features import predict, sample_input, init_code_list, PredictState
+from .features import predict, init_code_list, PredictState, Predictor
 
 
 class Settings(BaseSettings):
     code_list: str = "code_list.txt"
     checkpoint: str = "latest.flax_model"
+    enable_cors: bool = Field(default=True, description="Enable CORS")
 
 settings = Settings()
-
-def create_agent():
-    return RNNAgent(
-        num_layers=2,
-        rnn_channels=512,
-        use_history=True,
-        rnn_type='lstm',
-        num_channels=128,
-        film=True,
-        noam=True,
-        version=2,
-    )
-
-
-@jax.jit
-def get_probs_and_value(params, rstate, obs):
-    agent = create_agent()
-    next_rstate, logits, value = agent.apply(params, obs, rstate)[:3]
-    probs = jax.nn.softmax(logits, axis=-1)
-    return next_rstate, probs, value
-
-
-def predict_fn(params, rstate, obs):
-    obs = jax.tree.map(lambda x: jnp.array([x]), obs)
-    rstate, probs, value = get_probs_and_value(params, rstate, obs)
-    return rstate, np.array(probs)[0].tolist(), float(np.array(value)[0])
 
 
 all_models = {}
 duel_states: Dict[str, PredictState] = {}
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -68,26 +40,9 @@ async def lifespan(app: FastAPI):
     
     init_code_list(settings.code_list)
 
-    agent = create_agent()
-    key = jax.random.PRNGKey(0)
-    key, agent_key = jax.random.split(key, 2)
-    sample_obs = sample_input()
-    sample_obs_ = jax.tree.map(lambda x: jnp.array([x]), sample_obs)
-
-    rstate = agent.init_rnn_state(1)
-    params = jax.jit(agent.init)(agent_key, sample_obs_, rstate)
-
     checkpoint = settings.checkpoint
-    with open(checkpoint, "rb") as f:
-        params = flax.serialization.from_bytes(params, f.read())
-
-    params = jax.device_put(params)
-    all_models["param"] = params
-
-    all_models["agent"] = agent
-
-    predict_fn(params, rstate, sample_obs)
-
+    predictor = Predictor.load(checkpoint)
+    all_models["default"] = predictor
     print(f"loaded checkpoint from {checkpoint}")
 
     state = new_state()
@@ -103,16 +58,17 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+if settings.enable_cors:
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=["*"],
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
 
 def new_state():
-    return PredictState(all_models["agent"].init_rnn_state(1))
+    return PredictState()
 
 @app.post('/v0/duels', response_model=DuelCreateResponse)
 async def create_duel() -> DuelCreateResponse:
@@ -153,10 +109,10 @@ async def duel_predict(
             error=f"index mismatch: expected {duel_state.index}, got {index}"
         )
 
-    params = all_models["param"]
+    predictor = all_models["default"]
+    model_fn = predictor.predict
 
     _start = time.time()    
-    model_fn = lambda r, x: predict_fn(params, r, x)
     try:
         predict_results = predict(model_fn, body.input, body.prev_action_idx, duel_state)
     except (KeyError, NotImplementedError) as e:

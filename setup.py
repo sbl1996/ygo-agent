@@ -16,9 +16,6 @@ REQUIRED = [
   "tyro",
   "pandas",
   "tensorboardX",
-  "fastapi",
-  "uvicorn[standard]",
-  "pydantic_settings",
   "tqdm",
 ]
 

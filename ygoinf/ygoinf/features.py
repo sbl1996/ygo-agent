@@ -40,10 +40,13 @@ def combinations_with_weight2(weights, r):
 N_CARD_FEATURES = 41
 MAX_CARDS = 80
 MAX_ACTIONS = 24
-N_GLOBAL_FEATURES = 23
 N_ACTION_FEATURES = 12
+N_GLOBAL_FEATURES = 23
 N_HISTORY_ACTIONS = 32
-H_ACTIONS_SHAPE = (N_HISTORY_ACTIONS, N_ACTION_FEATURES + 2)
+H_ACTIONS_FEATS = 14
+N_RNN_CHANNELS = 512
+
+H_ACTIONS_SHAPE = (N_HISTORY_ACTIONS, H_ACTIONS_FEATS)
 DESCRIPTION_LIMIT = 10000
 CARD_EFFECT_OFFSET = 10010
 
@@ -58,9 +61,13 @@ def sample_input():
         "global_": global_,
         "actions_": legal_actions,
         "h_actions_": history_actions,
-        "mask_": None,
     }
 
+def init_rstate():
+    return (
+        np.zeros((1, N_RNN_CHANNELS), dtype=np.float32),
+        np.zeros((1, N_RNN_CHANNELS), dtype=np.float32),
+    )
 
 system_strings = [
     1050, 1051, 1052, 1054, 1055, 1056, 1057, 1058, 1059, 1060,
@@ -1047,8 +1054,8 @@ class HistoryActions:
 
 class PredictState:
 
-    def __init__(self, init_rstate):
-        self.rstate = init_rstate
+    def __init__(self):
+        self.rstate = init_rstate()
         self.index = 0
         self.history_actions = HistoryActions()
 
@@ -1097,7 +1104,6 @@ def predict(model_fn, input: Input, prev_action_idx, state: PredictState):
         "global_": global_,
         "actions_": actions,
         "h_actions_": h_actions,
-        "mask_": None,
     }
     if n_actions == 1:
         probs = [1.0]
@@ -1123,3 +1129,24 @@ def predict(model_fn, input: Input, prev_action_idx, state: PredictState):
     state.record(input, actions, probs)
     state.index += 1
     return predict_results
+
+
+class Predictor:
+    def __init__(self, loaded, predict_fn):
+        self.loaded = loaded
+        self.predict_fn = predict_fn
+    
+    def predict(self, rstate, sample_obs):
+        return self.predict_fn(self.loaded, rstate, sample_obs)
+    
+    @staticmethod
+    def load(checkpoint):
+        sample_obs = sample_input()
+        rstate = init_rstate()
+        if checkpoint.endswith(".flax_model"):
+            from .jax_inf import load_model, predict_fn
+        elif checkpoint.endswith(".tflite"):
+            from .tflite_inf import load_model, predict_fn
+        predictor = Predictor(load_model(checkpoint, rstate, sample_obs), predict_fn)
+        predictor.predict(rstate, sample_obs)
+        return predictor
