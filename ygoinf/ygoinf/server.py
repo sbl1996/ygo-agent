@@ -34,10 +34,7 @@ duel_states: Dict[str, PredictState] = {}
 
 
 @asynccontextmanager
-async def lifespan(app: FastAPI):
-    from jax.experimental.compilation_cache import compilation_cache as cc
-    cc.set_cache_dir(os.path.expanduser("~/.cache/jax"))
-    
+async def lifespan(app: FastAPI):    
     init_code_list(settings.code_list)
 
     checkpoint = settings.checkpoint
