@@ -1,6 +1,10 @@
+import os
 import numpy as np
 
 import jax
+from jax.experimental.compilation_cache import compilation_cache as cc
+cc.set_cache_dir(os.path.expanduser("~/.cache/jax"))
+
 import jax.numpy as jnp
 import flax
 from ygoai.rl.jax.agent import RNNAgent
