@@ -1,5 +1,6 @@
 from enum import Enum
 from itertools import combinations
+import time
 
 from typing import List
 
@@ -1060,7 +1061,9 @@ class PredictState:
         self.history_actions = HistoryActions()
 
         self.reset()
-    
+
+        self._timestamp = time.time()
+
     def reset(self):
         self._probs = None
         self._actions = None
@@ -1073,13 +1076,14 @@ class PredictState:
         action = self._actions[idx1]
         self.history_actions.update(action, self._turn, self._phase)
         self.reset()
-    
+
     def record(self, input: Input, actions, probs):
         self._probs = probs
         self._actions = actions
         self._action_msg = input.action_msg
         self._turn = input.global_.turn
         self._phase = input.global_.phase
+        self._timestamp = time.time()
 
 def revert_pad_truncate(probs, n_actions):
     if len(probs) < n_actions:

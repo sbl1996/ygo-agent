@@ -3,7 +3,7 @@ from setuptools import setup, find_packages
 __version__ = "0.0.1"
 
 INSTALL_REQUIRES = [
-  "numpy",
+  "numpy==1.26.4",
   "optree",
   "fastapi",
   "uvicorn[standard]",

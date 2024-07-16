@@ -3,6 +3,7 @@ os.environ.setdefault("JAX_PLATFORMS", "cpu")
 from typing import Union, Dict
 
 import time
+import threading
 import uuid
 from contextlib import asynccontextmanager
 
@@ -25,13 +26,28 @@ class Settings(BaseSettings):
     code_list: str = "code_list.txt"
     checkpoint: str = "latest.flax_model"
     enable_cors: bool = Field(default=True, description="Enable CORS")
+    state_expire: int = Field(default=3600, description="Duel state expire time in seconds")
+    test_duel_id: str = Field(default="9654823a-23fd-4850-bb-6fec241740b0", description="Test duel id")
 
 settings = Settings()
-
 
 all_models = {}
 duel_states: Dict[str, PredictState] = {}
 
+def delete_outdated_states():
+    while True:
+        current_time = time.time()
+        for k, v in list(duel_states.items()):
+            if k == settings.test_duel_id:
+                continue
+            if current_time - v._timestamp > settings.state_expire:
+                del duel_states[k]
+        time.sleep(600)
+
+# Start the thread to delete outdated states
+thread = threading.Thread(target=delete_outdated_states)
+thread.daemon = True
+thread.start()
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):    
@@ -43,7 +59,7 @@ async def lifespan(app: FastAPI):
     print(f"loaded checkpoint from {checkpoint}")
 
     state = new_state()
-    test_duel_id = "9654823a-23fd-4850-bb-6fec241740b0"
+    test_duel_id = settings.test_duel_id
     duel_states[test_duel_id] = state
 
     yield
