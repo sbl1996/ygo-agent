@@ -8,6 +8,7 @@ import uuid
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Path
+from fastapi.responses import PlainTextResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import Field
 from pydantic_settings import BaseSettings
@@ -82,6 +83,11 @@ if settings.enable_cors:
 
 def new_state():
     return PredictState()
+
+@app.get('/', status_code=200, response_class=PlainTextResponse)
+async def root():
+    return "OK"
+
 
 @app.post('/v0/duels', response_model=DuelCreateResponse)
 async def create_duel() -> DuelCreateResponse:
