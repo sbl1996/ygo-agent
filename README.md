@@ -17,7 +17,7 @@ YGO Agent is a project aimed at mastering the popular trading card game Yu-Gi-Oh
   - [ygoenv](#ygoenv)
   - [ygoai](#ygoai)
 - [Installation](#installation)
-  - [Quick Start](#quick-start)
+  - [Quick start](#quick-start)
   - [Building from source](#building-from-source)
   - [Troubleshooting](#troubleshooting)
 - [Evaluation](#evaluation)
@@ -181,7 +181,7 @@ python -u battle.py --xla_device cpu --checkpoint1 checkpoints/0546_22750M.flax_
 
 ### Single GPU Training
 
-The minimum requirement of training is a NVIDIA GPU. I can even train on a laptop with a 1650. The supported decks that can be found [here](./assets/deck/). Any combination of cards included in these decks is fine, and more will be added later. For demonstration, we'll choose just one deck to train from scratch.
+The minimum requirement of training is a NVIDIA GPU. I can even train on a laptop with a GeForce GTX 1650. The supported decks that can be found [here](./assets/deck/). Any combination of cards included in these decks is fine, and more will be added later. For demonstration, we'll choose just one deck to train from scratch.
 
 ```bash
 cd scripts
