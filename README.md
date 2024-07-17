@@ -17,6 +17,7 @@ YGO Agent is a project aimed at mastering the popular trading card game Yu-Gi-Oh
   - [ygoenv](#ygoenv)
   - [ygoai](#ygoai)
 - [Installation](#installation)
+  - [Quick Start](#quick-start)
   - [Building from source](#building-from-source)
   - [Troubleshooting](#troubleshooting)
 - [Evaluation](#evaluation)
@@ -45,6 +46,7 @@ YGO Agent is a project aimed at mastering the popular trading card game Yu-Gi-Oh
 
 ## Installation
 
+### Quick start
 Pre-built binaries are available for Ubuntu 22.04 or newer. If you're using them, follow the installation instructions below. Otherwise, please build from source following [Building from source](#building-from-source).
 
 1. Install JAX and other dependencies:
