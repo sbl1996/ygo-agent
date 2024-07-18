@@ -1189,9 +1189,6 @@ def main():
         if args.local_rank == 0 and learner_policy_version % args.save_interval == 0 and not args.debug:
             ckpt_steps = tb_global_step // 2**20
             step_str = "M"
-            if ckpt_steps == 0:
-                ckpt_steps = tb_global_step // 2**10
-                step_str = "K"
             ckpt_name = f"{timestamp}_{ckpt_steps}{step_str}.flax_model"
             ckpt_maneger.save(unreplicated_params, ckpt_name)
 

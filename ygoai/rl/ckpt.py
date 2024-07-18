@@ -40,11 +40,13 @@ class ModelCheckpoint(object):
         print(f"Saved model to {path}")
 
         if len(self._saved) > self._n_saved:
-            path = self._saved.pop(0)
-            if path.is_dir():
-                shutil.rmtree(path)
-            else:
-                os.remove(path)
+            to_remove = self._saved.pop(0)
+            if to_remove != path:
+                if to_remove.is_dir():
+                    shutil.rmtree(to_remove)
+                else:
+                    if to_remove.exists():
+                        os.remove(to_remove)
     
     def get_latest(self):
         path = self._saved[-1]
