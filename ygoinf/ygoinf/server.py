@@ -29,6 +29,7 @@ class Settings(BaseSettings):
     enable_cors: bool = Field(default=True, description="Enable CORS")
     state_expire: int = Field(default=3600, description="Duel state expire time in seconds")
     test_duel_id: str = Field(default="9654823a-23fd-4850-bb-6fec241740b0", description="Test duel id")
+    ygo_num_threads: int = Field(default=1, description="Number of threads to use for YGO prediction")
 
 settings = Settings()
 
@@ -55,7 +56,7 @@ async def lifespan(app: FastAPI):
     init_code_list(settings.code_list)
 
     checkpoint = settings.checkpoint
-    predictor = Predictor.load(checkpoint)
+    predictor = Predictor.load(checkpoint, settings.ygo_num_threads)
     all_models["default"] = predictor
     print(f"loaded checkpoint from {checkpoint}")
 

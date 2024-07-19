@@ -1144,13 +1144,13 @@ class Predictor:
         return self.predict_fn(self.loaded, rstate, sample_obs)
     
     @staticmethod
-    def load(checkpoint):
+    def load(checkpoint, num_threads):
         sample_obs = sample_input()
         rstate = init_rstate()
         if checkpoint.endswith(".flax_model"):
             from .jax_inf import load_model, predict_fn
         elif checkpoint.endswith(".tflite"):
             from .tflite_inf import load_model, predict_fn
-        predictor = Predictor(load_model(checkpoint, rstate, sample_obs), predict_fn)
+        predictor = Predictor(load_model(checkpoint, rstate, sample_obs, num_threads=num_threads), predict_fn)
         predictor.predict(rstate, sample_obs)
         return predictor

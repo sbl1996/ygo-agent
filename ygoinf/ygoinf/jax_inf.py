@@ -35,7 +35,7 @@ def predict_fn(params, rstate, obs):
     rstate, probs, value = get_probs_and_value(params, rstate, obs)
     return rstate, np.array(probs)[0].tolist(), float(np.array(value)[0])
 
-def load_model(checkpoint, rstate, sample_obs):
+def load_model(checkpoint, rstate, sample_obs, **kwargs):
     agent = create_agent()
     key = jax.random.PRNGKey(0)
     key, agent_key = jax.random.split(key, 2)

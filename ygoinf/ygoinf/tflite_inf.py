@@ -23,9 +23,10 @@ def predict_fn(interpreter, rstate, obs):
     value = float(value[0])
     return rstate, prob, value
 
-def load_model(checkpoint, *args):
+def load_model(checkpoint, *args, **kwargs):
     with open(checkpoint, "rb") as f:
         tflite_model = f.read()
-    interpreter = tf_lite.Interpreter(model_content=tflite_model)
+    interpreter = tf_lite.Interpreter(
+        model_content=tflite_model, num_threads=kwargs.get("num_threads", 1))
     interpreter.allocate_tensors()
     return interpreter
