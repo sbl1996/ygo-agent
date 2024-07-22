@@ -187,7 +187,7 @@ The minimum requirement of training is a NVIDIA GPU. I can even train on a lapto
 cd scripts
 python -u cleanba.py --actor-device-ids 0 --learner-device-ids 0 --deck ../assets/deck/BlueEyes.ydk \
 --local-num_envs 16 --num-minibatches 8 --learning-rate 1e-4 --vloss_clip 1.0 \
---save_interval 50 --local_eval_episodes 32 --eval_interval 50 --seed 0 --tb_dir None
+--save_interval 50 --local_eval_episodes 32 --eval_interval 50 --seed 0 --tb_dir None --checkpoint checkpoints/XXX.flax_model
 ```
 
 We specify the location of the Blue-Eyes White Dragon deck to be trained through `--deck`. The training then opens `16` parallel environments on each actor, with 2 actors by default, for a total of 32 parallel environments. Every 128 steps is one exploration training cycle (iter), and all samples obtained are divided into `8` minibatches, resulting in a minibatch size of 512, corresponding to a learning rate of `1e-4`. `--save_interval` indicates saving the model every 50 iters, and `--eval_interval` indicates evaluating against a random strategy every 50 iters.
@@ -267,22 +267,19 @@ TODO
 ## Roadmap
 
 ### Environment
-- Generation of yrpX replay files
+- Support more cards (first windbot and top tier decks)
+- Generation of yrpX and yrp3d replay files
 - Support EDOPro
 
-### Training
-- League training (AlphaStar, ROA-Star)
-- Nash equilibrium training (OSFP, DeepNash)
-- Individual agent for first and second player
-- Centralized critic with full observation
+### YGO
+- Implement AI deck building
+- Support BO3, able to exploit information from previous duels
 
-### Inference
-- Export as SavedModel
-- MCTS-based planning
-
-### Documentation
-- JAX training
-- Custom cards
+### RL
+- Fast fine-tuning methods for new decks
+- Zero-shot generalization of new cards
+- MCTS Planning
+- Nash equilibrium and League training
 
 
 ## Sponsors
