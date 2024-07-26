@@ -66,7 +66,7 @@ Pre-built binaries are available for Ubuntu 22.04 or newer. If you're using them
    cd ygo-agent
    # Choose the appropriate version for your Python (cp310, cp311, or cp312)
    wget -O ygopro_ygoenv.so https://github.com/sbl1996/ygo-agent/releases/download/v0.1/ygopro_ygoenv_cp310.so
-   mv ygopro_ygoenv_cp310.so ygoenv/ygoenv/ygopro/ygopro_ygoenv.so
+   mv ygopro_ygoenv.so ygoenv/ygoenv/ygopro/ygopro_ygoenv.so
    make
    ```
 
@@ -265,6 +265,9 @@ Training an agent with many decks requires a lot of computational resources, typ
 TODO
 
 ## Roadmap
+
+### Game play
+- Client-side deployment like Windbot
 
 ### Environment
 - Support more cards (first windbot and top tier decks)
