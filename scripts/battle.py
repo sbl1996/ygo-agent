@@ -26,10 +26,8 @@ class Args:
     seed: int = 1
     """the random seed"""
 
-    env_id1: str = "YGOPro-v1"
-    """the id of the environment1"""
-    env_id2: Optional[str] = None
-    """the id of the environment2, defaults to `env_id1`"""
+    env_id: str = "YGOPro-v1"
+    """the id of the environment"""
     deck: str = "../assets/deck"
     """the deck file to use"""
     deck1: Optional[str] = None
@@ -42,10 +40,8 @@ class Args:
     """the language to use"""
     max_options: int = 24
     """the maximum number of options"""
-    n_history_actions1: int = 32
-    """the number of history actions to use for the environment1"""
-    n_history_actions2: Optional[int] = None
-    """the number of history actions to use for the environment2, defaults to `n_history_actions1`"""
+    n_history_actions: int = 32
+    """the number of history actions to use for the environment"""
     oppo_info: bool = False
     """whether to use opponent information"""
     num_embeddings: Optional[int] = None
@@ -54,6 +50,8 @@ class Args:
     """whether to do accurate evaluation. If not, there will be more short games"""
     reverse: bool = False
     """whether to reverse the order of the agents"""
+    truncate: float = 0.0
+    """the truncation ratio of games"""
 
     verbose: bool = False
     """whether to print debug information"""
@@ -111,23 +109,10 @@ if __name__ == "__main__":
 
     args.env_threads = min(args.env_threads or args.num_envs, args.num_envs)
 
-    if args.env_id2 is None:
-        args.env_id2 = args.env_id1
-    if args.n_history_actions2 is None:
-        args.n_history_actions2 = args.n_history_actions1
+    deck = init_ygopro(args.env_id, args.lang, args.deck, args.code_list_file)
 
-    cross_env = args.env_id1 != args.env_id2
-    env_id1 = args.env_id1
-    env_id2 = args.env_id2
-
-    deck1 = init_ygopro(env_id1, args.lang, args.deck, args.code_list_file)
-    if not cross_env:
-        deck2 = deck1
-    else:
-        deck2 = init_ygopro(env_id2, args.lang, args.deck, args.code_list_file)
-
-    args.deck1 = args.deck1 or deck1
-    args.deck2 = args.deck2 or deck2
+    args.deck1 = args.deck1 or deck
+    args.deck2 = args.deck2 or deck
 
     seed = args.seed + 100000
     random.seed(seed)
@@ -157,51 +142,35 @@ if __name__ == "__main__":
         verbose=args.verbose,
         record=args.record,
     )
-    envs1 = ygoenv.make(
-        task_id=env_id1,
-        n_history_actions=args.n_history_actions1,
+    envs = ygoenv.make(
+        task_id=args.env_id,
+        n_history_actions=args.n_history_actions,
         deck1=args.deck1,
         deck2=args.deck2,
         oppo_info=args.oppo_info,
         **env_option,
     )
-    envs1.num_envs = num_envs
-    envs1 = EnvPreprocess(envs1, skip_mask=not args.oppo_info)
-
-    if cross_env:
-        envs2 = ygoenv.make(
-            task_id=env_id2,
-            n_history_actions=args.n_history_actions2,
-            deck1=deck2,
-            deck2=deck2,
-            **env_option,
-        )
-        envs2.num_envs = num_envs
+    envs.num_envs = num_envs
+    envs = EnvPreprocess(envs, skip_mask=not args.oppo_info)
 
     key = jax.random.PRNGKey(seed)
 
-    obs_space1 = envs1.observation_space
-    envs1 = RecordEpisodeStatistics(envs1)
-    sample_obs1 = jax.tree.map(lambda x: jnp.array([x]), obs_space1.sample())
+    obs_space = envs.observation_space
+    envs = RecordEpisodeStatistics(envs)
+    sample_obs = jax.tree.map(lambda x: jnp.array([x]), obs_space.sample())
     agent1 = create_agent1(args)
     rstate1 = agent1.init_rnn_state(1)
-    params1 = jax.jit(agent1.init)(key, sample_obs1, rstate1)
+    params1 = jax.jit(agent1.init)(key, sample_obs, rstate1)
     with open(args.checkpoint1, "rb") as f:
         params1 = flax.serialization.from_bytes(params1, f.read())
 
-    if cross_env:
-        obs_space2 = envs2.observation_space
-        envs2 = RecordEpisodeStatistics(envs2)
-        sample_obs2 = jax.tree.map(lambda x: jnp.array([x]), obs_space2.sample())
-    else:
-        sample_obs2 = sample_obs1
-
     if args.checkpoint1 == args.checkpoint2:
+        agent2 = agent1
         params2 = params1
     else:
         agent2 = create_agent2(args)
         rstate2 = agent2.init_rnn_state(1)
-        params2 = jax.jit(agent2.init)(key, sample_obs2, rstate2)
+        params2 = jax.jit(agent2.init)(key, sample_obs, rstate2)
         with open(args.checkpoint2, "rb") as f:
             params2 = flax.serialization.from_bytes(params2, f.read())
     
@@ -234,25 +203,19 @@ if __name__ == "__main__":
                 lambda x: jnp.where(done[:, None], 0, x), (rstate1, rstate2))
             return rstate1, rstate2, probs
 
-        def predict_fn(rstate1, rstate2, obs1, obs2, main, done):
-            rstate1, rstate2, probs = get_probs2(params1, params2, rstate1, rstate2, obs1, obs2, main, done)
+        def predict_fn(rstate1, rstate2, obs, main, done):
+            rstate1, rstate2, probs = get_probs2(params1, params2, rstate1, rstate2, obs, obs, main, done)
             return rstate1, rstate2, np.array(probs)
     else:
-        def predict_fn(rstate1, rstate2, obs1, obs2, main, done):
+        def predict_fn(rstate1, rstate2, obs, main, done):
             if main[0]:
-                rstate1, probs = get_probs(params1, rstate1, obs1, done, 1)
+                rstate1, probs = get_probs(params1, rstate1, obs, done, 1)
             else:
-                rstate2, probs = get_probs(params2, rstate2, obs2, done, 2)
+                rstate2, probs = get_probs(params2, rstate2, obs, done, 2)
             return rstate1, rstate2, np.array(probs)
 
-    obs1, infos1 = envs1.reset()
-    next_to_play1 = infos1['to_play']
-    if cross_env:
-        obs2, infos2 = envs2.reset()
-        next_to_play2 = infos2['to_play']
-        np.testing.assert_array_equal(next_to_play1, next_to_play2)
-    else:
-        obs2 = obs1
+    obs, infos = envs.reset()
+    next_to_play = infos['to_play']
 
     dones = np.zeros(num_envs, dtype=np.bool_)
 
@@ -273,8 +236,6 @@ if __name__ == "__main__":
         main_player = np.concatenate([second_player, first_player])
     else:
         main_player = np.concatenate([first_player, second_player])
-    # main_player = np.zeros(num_envs, dtype=np.int64)
-    # main_player = np.ones(num_envs, dtype=np.int64)
     rstate1 = agent1.init_rnn_state(num_envs)
     rstate2 = agent2.init_rnn_state(num_envs)
     collected = np.zeros((args.num_episodes,), dtype=np.bool_)
@@ -290,42 +251,35 @@ if __name__ == "__main__":
             model_time = env_time = 0
 
         _start = time.time()
-        main = next_to_play1 == main_player
-        rstate1, rstate2, probs = predict_fn(rstate1, rstate2, obs1, obs2, main, dones)
+        main = next_to_play == main_player
+        rstate1, rstate2, probs = predict_fn(rstate1, rstate2, obs, main, dones)
 
         actions = probs.argmax(axis=1)
         model_time += time.time() - _start
 
-        to_play1 = next_to_play1
+        to_play = next_to_play
 
         _start = time.time()
-        obs1, rewards1, dones1, infos1 = envs1.step(actions)
-        next_to_play1 = infos1['to_play']
-        if cross_env:
-            obs2, rewards2, dones2, infos2 = envs2.step(actions)
-            next_to_play2 = infos2['to_play']
-            np.testing.assert_array_equal(next_to_play1, next_to_play2)
-            np.testing.assert_array_equal(dones1, dones2)
-        else:
-            obs2 = obs1
+        obs, rewards, dones, infos = envs.step(actions)
+        next_to_play = infos['to_play']
 
         env_time += time.time() - _start
 
         step += 1
 
-        for idx, d in enumerate(dones1):
+        for idx, d in enumerate(dones):
             if not d or (args.accurate and collected[idx]):
                 continue
             # c1 = collected[idx]
             collected[idx] = True
-            win_reason = infos1['win_reason'][idx]
+            win_reason = infos['win_reason'][idx]
             pl = 1 if main[idx] else -1
-            episode_length = infos1['l'][idx]
-            episode_reward = infos1['r'][idx]
+            episode_length = infos['l'][idx]
+            episode_reward = infos['r'][idx]
             main_reward = episode_reward * pl
             win = int(main_reward > 0)
 
-            win_player = 0 if (to_play1[idx] == 0 and episode_reward > 0) or (to_play1[idx] == 1 and episode_reward < 0) else 1
+            win_player = 0 if (to_play[idx] == 0 and episode_reward > 0) or (to_play[idx] == 1 and episode_reward < 0) else 1
             win_players.append(win_player)
             win_agent = 1 if main_reward > 0 else 2
             win_agents.append(win_agent)
@@ -347,7 +301,7 @@ if __name__ == "__main__":
             else:
                 main_player[idx] = 1 - main_player[idx]
 
-        if len(episode_lengths) >= args.num_episodes:
+        if len(episode_lengths) >= int(args.num_episodes * (1 - args.truncate)):
             break
 
     if not args.verbose:
