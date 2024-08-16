@@ -2,13 +2,12 @@ import os
 import time
 from dataclasses import dataclass
 from typing import Optional
+import tyro
 
 import pickle
 import numpy as np
 
 import voyageai
-
-import tyro
 
 from ygoai.embed import read_cards
 from ygoai.utils import load_deck

@@ -12,7 +12,6 @@
 #include <string>
 #include <cstring>
 #include <fstream>
-#include <shared_mutex>
 #include <iostream>
 #include <set>
 
@@ -132,6 +131,36 @@ combinations_with_weight2(
     }
   }
   return results;
+}
+
+inline std::vector<uint32_t>
+parse_codes_from_opcodes(const std::vector<uint32_t> &opcodes) {
+  int n = opcodes.size();
+  std::vector<uint32_t> codes;
+
+  if (n == 2) {
+    codes.push_back(opcodes[0]);
+    return codes;
+  }
+
+  if (((n - 2) % 3) != 0) {
+    for (int i = 0; i < n; i++) {
+      fmt::println("{}: {}", i, opcodes[i]);
+    }
+    throw std::runtime_error("invalid format of opcodes");
+  }
+
+  for (int i = 2; i < n; i += 3) {
+    codes.push_back(opcodes[i]);
+    if ((opcodes[i + 1] != 1073742080) || (opcodes[i + 2] != 1073741829)) {
+      for (int i = 0; i < n; i++) {
+        fmt::println("{}: {}", i, opcodes[i]);
+      }
+      auto err = fmt::format("invalid format of opcodes starting from {}", i);
+      throw std::runtime_error(err);
+    }
+  }
+  return codes;
 }
 
 static std::string msg_to_string(int msg) {
@@ -764,6 +793,7 @@ static const std::vector<int> _msgs = {
     MSG_SELECT_YESNO,    MSG_SELECT_BATTLECMD, MSG_SELECT_UNSELECT_CARD,
     MSG_SELECT_OPTION,   MSG_SELECT_PLACE,     MSG_SELECT_SUM,
     MSG_SELECT_DISFIELD, MSG_ANNOUNCE_ATTRIB,  MSG_ANNOUNCE_NUMBER,
+    MSG_ANNOUNCE_CARD,
 };
 
 static const ankerl::unordered_dense::map<int, uint8_t> msg2id =
@@ -997,6 +1027,7 @@ public:
   int spec_index_ = 0;
   CardId cid_ = 0;
   int msg_ = 0;
+  uint32_t response_ = 0;
 
   static LegalAction from_spec(const std::string &spec) {
     LegalAction la;
@@ -1161,8 +1192,6 @@ struct MDuel {
   std::vector<CardCode> extra_deck1;
   std::string deck_name1;
 };
-
-static std::mutex duel_mtx;
 
 inline Card db_query_card(const SQLite::Database &db, CardCode code) {
   SQLite::Statement query1(db, "SELECT * FROM datas WHERE id=?");
@@ -1330,13 +1359,12 @@ inline void preload_deck(const SQLite::Database &db,
 inline uint32 card_reader_callback(CardCode code, card_data *card) {
   auto it = cards_data_.find(code);
   if (it == cards_data_.end()) {
+    fmt::println("[card_reader_callback] Card not found: " + std::to_string(code));
     throw std::runtime_error("[card_reader_callback] Card not found: " + std::to_string(code));
   }
   *card = it->second;
   return 0;
 }
-
-static std::shared_timed_mutex scripts_mtx;
 
 inline byte *read_card_script(const std::string &path, int *lenptr) {
   std::ifstream file(path, std::ios::binary);
@@ -1355,15 +1383,10 @@ inline byte *read_card_script(const std::string &path, int *lenptr) {
 
 inline byte *script_reader_callback(const char *name, int *lenptr) {
   std::string path(name);
-  std::shared_lock<std::shared_timed_mutex> lock(scripts_mtx);
   auto it = cards_script_.find(path);
   if (it == cards_script_.end()) {
-    lock.unlock();
-    int len;
-    byte *buf = read_card_script(path, &len);
-    std::unique_lock<std::shared_timed_mutex> ulock(scripts_mtx);
-    cards_script_[path] = {buf, len};
-    it = cards_script_.find(path);
+    fmt::println("[script_reader_callback] Script not found: " + path);
+    throw std::runtime_error("[script_reader_callback] Script not found: " + path);
   }
   *lenptr = it->second.len;
   return it->second.buf;
@@ -1373,16 +1396,37 @@ static void init_module(const std::string &db_path,
                         const std::string &code_list_file,
                         const std::map<std::string, std::string> &decks) {
   // parse code from code_list_file
+  SQLite::Database db(db_path, SQLite::OPEN_READONLY);
+
+  auto start = std::chrono::steady_clock::now();
+
   std::ifstream file(code_list_file);
   std::string line;
   int i = 0;
+  CardCode code;
+  int has_script, script_len;
   while (std::getline(file, line)) {
     i++;
-    CardCode code = std::stoul(line);
+    std::istringstream iss(line);
+    if (!(iss >> code >> has_script)) {
+        std::cerr << "Failed to parse line in code_list: " << line << std::endl;
+        continue;
+    }
     card_ids_[code] = i;
+    cards_[code] = db_query_card(db, code);
+    cards_data_[code] = db_query_card_data(db, code);
+    if (has_script) {
+      std::string path = "./script/c" + std::to_string(code) + ".lua";
+      byte *buf = read_card_script(path, &script_len);
+      cards_script_[path] = {buf, script_len};
+    }
   }
 
-  SQLite::Database db(db_path, SQLite::OPEN_READONLY);
+  auto end = std::chrono::steady_clock::now();
+  auto milliseconds =
+      std::chrono::duration_cast<std::chrono::milliseconds>(end - start)
+          .count();
+  // fmt::println("load {} cards in {}ms", cards_data_.size(), milliseconds);
 
   for (const auto &[name, deck] : decks) {
     auto [main_deck, extra_deck, side_deck] = read_decks(deck);
@@ -1392,10 +1436,6 @@ static void init_module(const std::string &db_path,
       deck_names_.push_back(name);
       deck_names_ids_[name] = deck_names_.size() - 1;
     }
-
-    preload_deck(db, main_deck);
-    preload_deck(db, extra_deck);
-    preload_deck(db, side_deck);
   }
 
   for (auto &[name, deck] : extra_decks_) {
@@ -1404,6 +1444,17 @@ static void init_module(const std::string &db_path,
 
   card_data card;
   cards_data_[0] = card;
+
+  std::vector<std::string> preload = {
+    "./script/constant.lua",
+    "./script/utility.lua",
+    "./script/procedure.lua",
+  };
+  for (const auto &path : preload) {
+    byte *buf = read_card_script(path, &script_len);
+    cards_script_[path] = {buf, script_len};
+  }
+  cards_script_["./script/c0.lua"] = {nullptr, 0};
 
   set_card_reader(card_reader_callback);
   set_script_reader(script_reader_callback);
@@ -1666,19 +1717,6 @@ protected:
   // chain
   PlayerId chaining_player_;
 
-  // double step_time_ = 0;
-  // uint64_t step_time_count_ = 0;
-
-  // double reset_time_ = 0;
-  // double reset_time_1_ = 0;
-  // double reset_time_2_ = 0;
-  // double reset_time_3_ = 0;
-  // uint64_t reset_time_count_ = 0;
-
-  // // average time for decks
-  // ankerl::unordered_dense::map<std::string, double> deck_time_;
-  // ankerl::unordered_dense::map<std::string, uint64_t> deck_time_count_;
-
   const int n_history_actions_;
 
   // circular buffer for history actions
@@ -1713,11 +1751,6 @@ protected:
 
   std::mt19937 gen_;
 
-  // async reset
-  const bool async_reset_;
-  int n_lives_ = 0;
-  // std::future<MDuel> duel_fut_;
-  // BS::thread_pool pool_;
   std::mt19937 duel_gen_;
 
 
@@ -1735,7 +1768,7 @@ public:
         play_modes_(parse_play_modes(spec.config["play_mode"_])),
         verbose_(spec.config["verbose"_]), record_(spec.config["record"_]),
         n_history_actions_(spec.config["n_history_actions"_]),
-        async_reset_(spec.config["async_reset"_]), greedy_reward_(spec.config["greedy_reward"_]) {
+        greedy_reward_(spec.config["greedy_reward"_]) {
     if (record_) {
       if (!verbose_) {
         throw std::runtime_error("record mode must be used with verbose mode and num_envs=1");
@@ -1745,17 +1778,6 @@ public:
 
     gen_ = std::mt19937(env_seed);
     duel_gen_ = std::mt19937(dist_int_(gen_));
-
-    if (async_reset_) {
-      fmt::println("Async reset is deprecated!!!");
-    }
-
-    // if (async_reset_) {
-    //   duel_fut_ = pool_.submit_task([
-    //     this, duel_seed=dist_int_(gen_)] {
-    //     return new_duel(duel_seed);
-    //   });
-    // }
 
     int max_options = spec.config["max_options"_];
     int n_action_feats = spec.state_spec["obs:actions_"_].shape[1];
@@ -1845,12 +1867,6 @@ public:
       YGO_EndDuel(pduel_);
     }
     MDuel mduel;
-    // if (async_reset_) {
-    //   mduel = duel_fut_.get();
-    //   n_lives_ = 1;
-    // } else {
-    //   mduel = new_duel(dist_int_(gen_));
-    // }
     mduel = new_duel(dist_int_(gen_));
 
     auto duel_seed = mduel.seed;
@@ -1960,23 +1976,6 @@ public:
 
     ret_reward_ = 0;
     ret_win_reason_ = 0;
-
-    // if (async_reset_) {
-    //   duel_fut_ = pool_.submit_task([
-    //     this, old_duel, duel_seed=dist_int_(gen_)] {
-    //     if (old_duel != 0) {
-    //       YGO_EndDuel(old_duel);
-    //     }
-    //     return new_duel(duel_seed);
-    //   });
-    // }
-    // update_time_stat(_start, reset_time_count_, reset_time_3_);
-
-    // update_time_stat(start, reset_time_count_, reset_time_);
-    // reset_time_count_++;
-    // if (reset_time_count_ % 20 == 0) {
-    //   fmt::println("Reset time: {:.3f}, {:.3f}, {:.3f}", reset_time_ * 1000, reset_time_2_ * 1000, reset_time_3_ * 1000);
-    // }
   }
 
   void init_multi_select(
@@ -2797,12 +2796,14 @@ private:
       _set_obs_action_effect(feat, i, action.effect_);
     } else if (msg == MSG_SELECT_PLACE || msg_ == MSG_SELECT_DISFIELD) {
       _set_obs_action_place(feat, i, action.place_);
+    } else if (msg == MSG_ANNOUNCE_CARD) {
+      // card id, already set
     } else if (msg == MSG_ANNOUNCE_ATTRIB) {
       _set_obs_action_attrib(feat, i, action.attribute_);
     } else if (msg == MSG_ANNOUNCE_NUMBER) {
       _set_obs_action_number(feat, i, action.number_);
     } else {
-      throw std::runtime_error("Unsupported message " + std::to_string(msg));
+      throw std::runtime_error("Unsupported message " + msg_to_string(msg));
     }
   }
 
@@ -5159,7 +5160,39 @@ private:
         resp |= action.attribute_;
         YGO_SetResponsei(pduel_, resp);
       };
+    } else if (msg_ == MSG_ANNOUNCE_CARD) {
+      auto player = read_u8();
+      int count = read_u8();
 
+      std::vector<uint32_t> opcodes;
+      opcodes.reserve(count);
+      for (int i = 0; i < count; i++) {
+        opcodes.push_back(read_u32());
+      }
+
+      auto codes = parse_codes_from_opcodes(opcodes);
+
+      if (verbose_) {
+        auto& pl = players_[player];
+        pl->notify("Select 1 card from the following cards:");
+        for (int i = 0; i < codes.size(); i++) {
+          pl->notify(fmt::format("{}: {}", i + 1, c_get_card(codes[i]).name_));
+        }
+      }
+
+      for (auto code : codes) {
+        LegalAction la;
+        la.cid_ = c_get_card_id(code);
+        la.response_ = code;
+        legal_actions_.push_back(la);
+      }
+
+      to_play_ = player;
+      callback_ = [this](int idx) {
+        const auto &action = legal_actions_[idx];
+        uint32_t resp = action.response_;
+        YGO_SetResponsei(pduel_, resp);
+      };
     } else if (msg_ == MSG_SELECT_POSITION) {
       auto player = read_u8();
       auto code = read_u32();
@@ -5225,11 +5258,6 @@ private:
   void _duel_end(uint8_t player, uint8_t reason) {
     winner_ = player;
     win_reason_ = reason;
-    // if (async_reset_) {
-    //   n_lives_--;
-    // } else {
-    //   YGO_EndDuel(pduel_);
-    // }
     YGO_EndDuel(pduel_);
 
     duel_started_ = false;
