@@ -1402,6 +1402,9 @@ static void init_module(const std::string &db_path,
     sort_extra_deck(deck);
   }
 
+  card_data card;
+  cards_data_[0] = card;
+
   set_card_reader(card_reader_callback);
   set_script_reader(script_reader_callback);
 }
