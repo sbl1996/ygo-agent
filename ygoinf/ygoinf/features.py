@@ -96,7 +96,8 @@ def init_code_list(code_list_file):
                 line = line.strip()
                 if len(line) == 0:
                     continue
-                code_to_id[int(line)] = i
+                code = int(line.split()[0])
+                code_to_id[code] = i
                 i += 1
 
 
@@ -839,7 +840,7 @@ def get_legal_actions(action_msg: ActionMsg) -> List[LegalAction]:
         if msg.count != 1:
             raise NotImplementedError("Multiple numbers are not supported.")
         for number in msg.numbers:
-            if number <= 0 or number > 12:
+            if number.number <= 0 or number.number > 12:
                 raise NotImplementedError(
                     "Number out of range, only 1-12 are supported.")
             action = LegalAction(msg=MsgName.announce_number)
