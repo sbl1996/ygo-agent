@@ -1017,10 +1017,12 @@ def add_skipped_back(probs, legal_actions, action_msg: ActionMsg):
             for i in skipped:
                 probs.insert(i, -1)
                 responses.insert(i, action_msg.data.cards[i].response)
+                can_finish.insert(i, False)
             if len(probs) == len(action_msg.data.cards):
                 # finish
                 probs.append(-1)
                 responses.append(-1)
+                can_finish.append(False)
     return probs, responses, can_finish
 
 
@@ -1122,7 +1124,7 @@ def predict(model_fn, input: Input, prev_action_idx, state: PredictState):
         assert len(probs) == n_actions
         probs, responses, can_finish = add_skipped_back(probs, legal_actions, input.action_msg)
         win_rate = (value + 1) / 2
-    assert len(probs) == len(responses)
+    assert len(probs) == len(responses) == len(can_finish)
     preds = [
         ActionPredict(prob=prob, response=response, can_finish=f)
         for prob, response, f in zip(probs, responses, can_finish)
