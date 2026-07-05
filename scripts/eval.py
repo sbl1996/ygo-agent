@@ -11,7 +11,7 @@ import numpy as np
 import tyro
 
 from ygoai.utils import init_ygopro
-from ygoai.rl.utils import RecordEpisodeStatistics
+from ygoai.rl.utils import RecordEpisodeStatistics, EnvPreprocess
 from ygoai.rl.jax.agent import RNNAgent, ModelArgs
 
 
@@ -120,9 +120,13 @@ if __name__ == "__main__":
         async_reset=False,
         verbose=args.verbose,
         record=args.record,
+        oppo_info=args.m.oppo_info,
     )
     obs_space = envs.observation_space
     envs.num_envs = num_envs
+    # Match the model's training-time obs pipeline: feeding a `mask_` to a model
+    # trained without one (oppo_info=False) silently corrupts its card features.
+    envs = EnvPreprocess(envs, skip_mask=not args.m.oppo_info)
     envs = RecordEpisodeStatistics(envs)
 
     if args.checkpoint:

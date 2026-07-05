@@ -142,6 +142,13 @@ if __name__ == "__main__":
         verbose=args.verbose,
         record=args.record,
     )
+    # The env's obs pipeline (whether `mask_` is supplied) must match each
+    # model's training config, or card features are silently corrupted. Derive
+    # the env's oppo_info from the models so it can't drift; the two must agree
+    # since a single env serves one obs format to both.
+    assert args.m1.oppo_info == args.m2.oppo_info, (
+        f"oppo_info mismatch: m1={args.m1.oppo_info}, m2={args.m2.oppo_info}")
+    args.oppo_info = args.m1.oppo_info
     envs = ygoenv.make(
         task_id=args.env_id,
         n_history_actions=args.n_history_actions,
