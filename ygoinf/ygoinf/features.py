@@ -411,6 +411,8 @@ class LegalAction(BaseModel):
     )
     card_id: int = Field(
         0, description='The card id.')
+    effect_card_code: int = Field(
+        0, description='Real engine card code owning an activated effect, when resolved by the combo driver.')
     response: int = Field(
         -100, description="The response to be send to the server.")
     can_finish: bool = Field(
